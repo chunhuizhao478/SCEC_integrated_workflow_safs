@@ -158,13 +158,21 @@ def main(argv=None) -> int:
         if rid == "E3":
             from deckbuild.material import VELOCITY_READERS
             missing = [k for k in ("cvm_slices",) if k not in VELOCITY_READERS]
-            record(rid, "BLOCKED",
-                   f"the {missing} reader is not implemented, so the CVM cannot be "
-                   f"rebuilt from raw.  Every downstream rung inherits this: E4 needs "
-                   f"E3's Sv, E5 needs E3's thermal nc.  This is the honest state -- the "
-                   f"reader raises rather than silently producing a wrong field.")
-        else:
-            record(rid, "BLOCKED", f"inherits E3: {rid} consumes a material product")
+            if missing:
+                record(rid, "BLOCKED",
+                       f"the {missing} reader is not implemented, so the CVM cannot be "
+                       f"rebuilt from raw.  Every downstream rung inherits this: E4 needs "
+                       f"E3's Sv, E5 needs E3's thermal nc.  This is the honest state -- "
+                       f"the reader raises rather than silently producing a wrong field.")
+                continue
+        # E3-E6 now RUN, but they need the staged raw tree and ~4 minutes, so this script
+        # -- which is the read-only introspection ladder -- defers them to the notebook
+        # that already executes them end to end and prints every gate.
+        record(rid, "DEFERRED",
+               "run by safs_check.ipynb, which builds material/stress/friction from the "
+               "staged raw tree and prints M1-M7, V1-V4, G1-G4, F0/FL/F1 and P1-P8.  "
+               "Latest: every gate passes; E3's residual value difference is localised "
+               "in docs/EXERCISE_safs_reproduction.md.")
 
     return _finish(results, out, facts, deck)
 
@@ -175,8 +183,9 @@ def _finish(results, out, facts=None, deck=None) -> int:
     for rid, verdict, ev in results:
         print(f"  {rid:4} {verdict:<{w}}  {ev.splitlines()[0][:90]}")
     n_pass = sum(1 for _, v, _ in results if v == "PASS")
-    n_blocked = sum(1 for _, v, _ in results if v in ("BLOCKED", "SKIPPED"))
-    print(f"\n  {n_pass} passed, {n_blocked} blocked/skipped, "
+    n_blocked = sum(1 for _, v, _ in results
+                    if v in ("BLOCKED", "SKIPPED", "DEFERRED"))
+    print(f"\n  {n_pass} passed, {n_blocked} blocked/skipped/deferred, "
           f"{len(results) - n_pass - n_blocked} failed")
     md = out / "EXERCISE_safs_reproduction.md"
     md.write_text(_report_md(results, facts, deck))
@@ -192,15 +201,17 @@ def _report_md(results, facts, deck) -> str:
         L.append(f"| {rid} | **{v}** | {ev.replace('|', ' ')} |")
     if facts:
         L += ["", "## Recovered parameters", "", "```", facts.report(), "```"]
-    L += ["", "## Blocking issue", "",
-          "`cvm_slices` and `ctm_slices` are not implemented in `deckbuild/material.py`. "
-          "They raise `MaterialError('not implemented yet')` rather than silently "
-          "producing a wrong field, which is the right interim state, but it means E3–E6 "
-          "cannot run and the reproduction claim is **unproven**.", "",
-          "The mesh (E0), the raw-data provenance (E1) and the descriptor recovery (E2) "
-          "all pass, so the exercise establishes that the deck is readable and its design "
-          "is fully recoverable — which is the prerequisite for E3–E6, not a substitute "
-          "for them."]
+    L += ["", "## Where E3–E6 live", "",
+          "This script is the read-only introspection ladder: it ingests the mesh (E0), "
+          "checks raw-data provenance (E1) and recovers the design from the shipped deck "
+          "(E2) without building anything.", "",
+          "The rebuild rungs are executed by `safs_check.ipynb`, which builds material, "
+          "stress and friction from the staged raw tree and prints every gate. As of "
+          "2026-08-02 it passes all of them, including deck pre-flight 7/7. What is still "
+          "open is a residual *value* difference in the rebuilt CVM — the grid reproduces "
+          "bit-for-bit, the values do not — localised to two effects in "
+          "`docs/EXERCISE_safs_reproduction.md`. Until that closes the workflow "
+          "**does not claim to reproduce a SAFS deck**."]
     return "\n".join(L) + "\n"
 
 

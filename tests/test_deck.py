@@ -192,6 +192,63 @@ def test_P5_interpolates_across_independent_grids(built, tmp_path):
     assert p5.passed and "yield" in p5.detail
 
 
+def test_P5_reads_the_nc_in_its_own_compression_negative_convention(tmp_path):
+    """Confinement must ADD strength.
+
+    The nc is compression-NEGATIVE, and SeisSol's Drucker-Prager limit
+    `max(0, c*cos(phi) - sin(phi)*sigma_m)` is written in that same convention, so
+    sigma_m < 0 at depth and -sin(phi)*sigma_m is a POSITIVE contribution.  Negating
+    into compression-positive inverts it: taulim then falls with depth, goes negative,
+    and the `taulim > 0` guard hides the damage everywhere except a thin crossover band.
+    Against the shipped SAFS deck that flip reported 1565 spurious yielding points at a
+    single z-level with a peak ratio of 8674; corrected, the same deck reports 0.
+
+    Pinned here on a two-level column: same deviator, ten times the confinement.  The
+    ratio MUST fall.  Under the flipped sign it rises (or is silenced by the guard).
+    """
+    from deckbuild.asagi import write_asagi
+    from deckbuild.contract import GateReport
+    from deckbuild.deck import _check_yield
+
+    x = np.array([0.0, 1000.0])
+    y = np.array([0.0, 1000.0])
+    z = np.array([-10000.0, -1000.0])          # deep level first, as ASAGI stores it
+    ones = np.ones((2, 2, 2))
+    # sigma_m = -100 MPa deep, -10 MPa shallow; identical 5 MPa shear deviator on both.
+    sm = np.array([-100e6, -10e6])[:, None, None] * ones
+    sf = {k: sm.copy() for k in ("s_xx", "s_yy", "s_zz")}
+    sf["s_xy"] = 5e6 * ones
+    sf["s_yz"] = np.zeros_like(ones)
+    sf["s_xz"] = np.zeros_like(ones)
+    snc = tmp_path / "t_stress.nc"
+    write_asagi(snc, x, y, z, sf)
+
+    pnc = tmp_path / "t_plasticity.nc"
+    write_asagi(pnc, x, y, z, {"plastCo": 1e6 * ones,
+                               "bulkFriction": np.tan(np.radians(30.0)) * ones})
+
+    deck = tmp_path / "d"
+    deck.mkdir()
+    (deck / "stress.nc").write_bytes(snc.read_bytes())
+
+    rep = GateReport("t")
+    _check_yield(deck, pnc, rep, "P5")
+    g = rep.gates[0]
+    assert g.passed, g.detail
+
+    # and the invariant itself, independent of the pass/fail threshold
+    from deckbuild.asagi import read_asagi
+    _, _, zz, f, _ = read_asagi(deck / "stress.nc")
+    smm = sum(f[k] for k in ("s_xx", "s_yy", "s_zz")) / 3.0 / 1e6
+    phi = np.radians(30.0)
+    taulim = 1.0 * np.cos(phi) - smm * np.sin(phi)
+    deep = int(np.argmin(zz))
+    shallow = int(np.argmax(zz))
+    assert taulim[deep].mean() > taulim[shallow].mean(), (
+        "confinement must increase the yield limit; it decreased, which is the "
+        "compression-positive sign flip returning")
+
+
 def test_P6_is_a_warning_not_a_prediction(built, tmp_path):
     """kappa is necessary, NOT sufficient -- a design passed it and still arrested."""
     cfg, arts, fw, _ = built

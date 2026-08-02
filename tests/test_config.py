@@ -56,7 +56,10 @@ def test_safs_alt_values():
     box = cfg.stress_box
     assert (box.xmin, box.xmax) == (350000.0, 630000.0)
     assert (box.ymin, box.ymax) == (3680000.0, 3850000.0)
-    assert (box.zmin, box.zmax) == (-17000.0, 0.0)
+    # -20000, not the raw ALT_BOX -17000: the legacy pipeline overrides it
+    # (`STRESS_BOX = dict(C.ALT_BOX); STRESS_BOX["zmin"] = -20000.0`) because the ALT
+    # fault bottoms at -19048.8 m.  The shipped nc is 281x171x81, i.e. -20000.
+    assert (box.zmin, box.zmax) == (-20000.0, 0.0)
     assert (box.dx, box.dz) == (1000.0, 250.0)
     assert cfg.meshes["alt"].tag_to_bc == {101: 3, 102: 1, 103: 5, 104: 5}
     assert cfg.meshes["alt"].daylights is False

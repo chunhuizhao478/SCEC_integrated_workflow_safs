@@ -473,8 +473,16 @@ def _check_yield(deck_dir, plast_nc, rep, gate) -> None:
     pf = trilinear_sample(plast_nc, XX.ravel(), YY.ravel(), ZZ.ravel(),
                           fields=["plastCo", "bulkFriction"])
     pf = {k: v.reshape(len(z), len(y), len(x)) for k, v in pf.items()}
-    sxx, syy, szz = (-sf[k] / 1e6 for k in ("s_xx", "s_yy", "s_zz"))
-    sxy, syz, sxz = (-sf[k] / 1e6 for k in ("s_xy", "s_yz", "s_xz"))
+    # SIGN: the nc is compression-NEGATIVE (SeisSol's tension-positive convention, see
+    # stress.py) and SeisSol's Drucker-Prager limit is written in that same convention:
+    #     taulim = max(0, plastCo*cos(phi) - sin(phi)*sigma_m),  sigma_m = tr(sigma)/3
+    # so sigma_m is NEGATIVE in compression and -sin(phi)*sigma_m ADDS strength with
+    # depth.  Negating into compression-positive here (as this gate first did) inverts
+    # that: taulim then FALLS with confinement, goes negative, and the taulim > 0 guard
+    # silences it -- leaving only a thin spurious band at the crossover, which is exactly
+    # what it reported.  tau is invariant under the flip; only sigma_m is not.
+    sxx, syy, szz = (sf[k] / 1e6 for k in ("s_xx", "s_yy", "s_zz"))
+    sxy, syz, sxz = (sf[k] / 1e6 for k in ("s_xy", "s_yz", "s_xz"))
     sm = (sxx + syy + szz) / 3.0
     j2 = 0.5 * ((sxx - sm) ** 2 + (syy - sm) ** 2 + (szz - sm) ** 2) \
         + sxy ** 2 + syz ** 2 + sxz ** 2

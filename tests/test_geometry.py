@@ -99,7 +99,9 @@ def test_build_grid_matches_the_legacy_box():
     b = cfg.stress_box
     assert gx[0] == b.xmin and gx[-1] == pytest.approx(b.xmax)
     assert gz[0] == b.zmin and gz[-1] == pytest.approx(b.zmax)
-    assert len(gx) == 281 and len(gz) == 69
+    # 281 x 81 -- the shipped safs_stress_andersonian_k1.7.nc's own axes.  81, not 69:
+    # the legacy STRESS_BOX drops zmin to -20000 to clear the ALT fault bottom.
+    assert len(gx) == 281 and len(gz) == 81
 
 
 # --------------------------------------------------------------------------- tractions

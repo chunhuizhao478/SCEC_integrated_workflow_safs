@@ -21,7 +21,10 @@ stress_box:
   xmax: 630000.0
   ymin: 3680000.0
   ymax: 3850000.0
-  zmin: -17000.0
+  # -20000, NOT -17000: the ALT fault bottoms at -19048.8 m, so a -17000 floor leaves
+  # 14194 facets outside the hull and ASAGI clamps them to the bottom level (gate V4hull).
+  # Matches the shipped nc's 281x171x81.
+  zmin: -20000.0
   zmax: 0.0                       # ALT does not daylight, so no z > 0 extension
   dx: 1000.0
   dz: 250.0
@@ -77,8 +80,13 @@ raw:
       grid_dx: 1500.0
       dz: 250.0
       z_min: -45000.0
-      z_max: 100.0
-      extend_z_top: 100.0
+      # +3250, NOT +100: the shipped material/plasticity nc is 452x361x194 and tops at
+      # +3250 m, its 14 levels above z = 0 being exact copies of the z = 0 level -- the
+      # constant cap that lets ASAGI cover topography.  z_max: 100 snaps down to 0 on the
+      # dz = 250 axis and yields 181 levels, so the grid silently misses the cap.
+      # Sv(z) stays referenced to SEA LEVEL, not to this grid top (see material.py).
+      z_max: 3250.0
+      extend_z_top: 3250.0
   thermal:
     kind: ctm_slices              # SCEC Community Thermal Model (shinevar2024)
     path: raw/ctm/CTM_*_h_data_final.csv

@@ -17,6 +17,15 @@ strike:
 
 # was: _common.PREF_BOX.  zmax = +3000 so the daylighting fault facets carry tau_0 > 0;
 # without it 7146 facets had sigma_n = 0 -> psi_ini = -inf -> "Inf/NaN in energies" abort.
+#
+# UNRESOLVED, and left as PREF_BOX deliberately: every shipped v4_0_0 PREFERRED deck
+# actually ships a 281x171x81 z[-20000, 0] stress nc -- the ALT box, not this one.  The
+# legacy pipeline notes ALT_BOX x/y already cover the PREFERRED fault bbox, and a
+# separate patch_shallow_topo_stress.py exists to lift the cap to +3000 afterwards, so
+# the shipped file may be the pre-patch one.  Gate V4hull decides it: build on this box,
+# and if the daylighting facets sit inside the hull, this box is right.  Do NOT change it
+# to match the shipped nc without re-running V4hull -- a z = 0 cap is what caused the
+# psi_ini = -inf abort in the first place.
 stress_box:
   xmin: 195000.0
   xmax: 628000.0
@@ -79,8 +88,14 @@ raw:
       grid_dx: 1500.0
       dz: 250.0
       z_min: -45000.0
-      z_max: 100.0
-      extend_z_top: 100.0
+      # +3250, NOT +100.  EVERY shipped v4_0_0 deck -- ALT and PREFERRED, CASE1 and
+      # CASE2 -- ships the same 452x361x194 safs_material_cvm.nc topping at +3250 m,
+      # and that nc's own global attribute records extend_z_top = 3250.0.  Its 14
+      # levels above z = 0 are exact copies of the z = 0 level: the constant cap that
+      # lets ASAGI cover topography.  z_max: 100 snaps down to 0 on the dz = 250 axis
+      # and silently drops the cap.
+      z_max: 3250.0
+      extend_z_top: 3250.0
   thermal:
     kind: ctm_slices
     path: raw/ctm/CTM_*_h_data_final.csv
@@ -89,6 +104,8 @@ raw:
       grid_dx: 1500.0
       dz: 200.0
       z_min: -21000.0
+      z_max: 200.0            # REQUIRED: the default is 0.0, which gives 106 levels.
+                              # Every shipped friction nc is 263x194x107, z[-21000, 200].
       extend_z_top: 200.0
 
 provenance:
