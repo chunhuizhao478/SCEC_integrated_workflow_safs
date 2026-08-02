@@ -219,10 +219,20 @@ def _eval_lua_text(text: str, s_km) -> np.ndarray:
     Parses the literals back out of the generated source rather than trusting the design
     object, so a mismatch between what was designed and what was WRITTEN is caught.
     """
-    base = re.search(r"return \{ \w+ = ([-\d.eE+]+) \+ inc \}", text)
+    # Accept both our form `= X + inc` and the LEGACY form `= X + inc * g`, where the
+    # shipped maps carry a `local g = <val>` global scale.  Phase 8 compares against those
+    # files, so the parser has to read them, not only what we emit.
+    base = re.search(r"return \{ \w+ = ([-\d.eE+]+) \+ inc(?:\s*\*\s*g)? \}", text)
     if not base:
-        raise FrictionError("FL: cannot find the base f_w in the emitted Lua")
-    out = np.full(np.shape(s_km), float(base.group(1)), float)
+        raise FrictionError(
+            "FL: cannot find the base f_w in the Lua.  Expected a line of the form "
+            "`return { <name> = <base> + inc }` or `... + inc * g }`; got:\n"
+            + "\n".join(l for l in text.splitlines() if "return {" in l))
+    g = 1.0
+    mg = re.search(r"local g\s*=\s*([-\d.eE+]+)", text)
+    if mg:
+        g = float(mg.group(1))
+    out = np.full(np.shape(s_km), 0.0, float)
     pat = re.compile(r"t = \(s - \(([-\d.eE+]+)\)\) / \(\(([-\d.eE+]+)\) - "
                      r"\(([-\d.eE+]+)\)\)\s*\n.*?\n.*?\n\s*inc = inc \+ "
                      r"\(([-\d.eE+]+) - \(([-\d.eE+]+)\)\)")
@@ -237,7 +247,7 @@ def _eval_lua_text(text: str, s_km) -> np.ndarray:
         t = np.clip((np.asarray(s_km, float) - float(lo)) / (float(hi) - float(lo)),
                     0.0, 1.0)
         out = out + (float(hv) - float(av)) * t * t * (3.0 - 2.0 * t)
-    return out
+    return float(base.group(1)) + out * g
 
 
 def nucleation_lua(snapped, radius_m: float, amplitude_mpa: float,

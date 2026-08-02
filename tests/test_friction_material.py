@@ -406,3 +406,35 @@ def test_R304_M4_runs_for_the_layered_reader(demo, tmp_path):
     assert m4, "M4 missing entirely"
     assert m4[0].severity != "skip", "M4 must run for layered_1d"
     assert m4[0].passed, m4[0].detail
+
+
+def test_eval_lua_reads_the_LEGACY_form_with_a_global_scale(tmp_path):
+    """The shipped maps use `return { rs_muw = X + inc * g }` with a `local g`.
+
+    Our emitter writes `X + inc`.  Phase 8 compares against the shipped files, so the
+    parser has to read BOTH -- it previously raised "cannot find the base f_w" on every
+    real deck.
+    """
+    strike = StrikeFrame(azimuth_deg=314.0, origin_xy=(606971.0, 3707270.0))
+    d = FwDesign(fw_values=(0.0, 0.05), boundaries_s_km=((10.0, 20.0),))
+    ours = write_lua_map(tmp_path / "m.yaml", d, strike).read_text()
+    legacy = ours.replace("+ inc }", "+ inc * g }").replace(
+        "      local inc = 0.0", "      local g = 1.0\n      local inc = 0.0")
+    s = np.linspace(-20.0, 60.0, 201)
+    assert np.allclose(_eval_lua_text(legacy, s), _eval_lua_text(ours, s), atol=0)
+
+
+def test_eval_lua_honours_the_global_scale(tmp_path):
+    strike = StrikeFrame(azimuth_deg=0.0, origin_xy=(0.0, 0.0))
+    d = FwDesign(fw_values=(0.0, 0.06), boundaries_s_km=((10.0, 20.0),))
+    ours = write_lua_map(tmp_path / "m.yaml", d, strike).read_text()
+    halved = ours.replace("+ inc }", "+ inc * g }").replace(
+        "      local inc = 0.0", "      local g = 0.5\n      local inc = 0.0")
+    s = np.array([100.0])                       # well past the transition
+    assert _eval_lua_text(halved, s)[0] == pytest.approx(0.03)
+
+
+def test_eval_lua_unparseable_names_the_offending_line(tmp_path):
+    with pytest.raises(FrictionError, match="return \\{"):
+        _eval_lua_text("function f(x)\n  return { rs_muw = wat }\nend\n",
+                       np.array([0.0]))
