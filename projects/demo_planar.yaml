@@ -36,6 +36,10 @@ meshes:
     tag_to_bc: {101: 3, 102: 1, 103: 5, 104: 5}
     daylights: false
     daylight_min_depth_m: 0.0
+    gates:                        # the demo mesh is DELIBERATELY coarse: it demonstrates
+      fault_edge_max_m: 4000.0    # the pipeline, not a production resolution.  SAFS uses
+      f_gate_hz: 0.05             # 500 m / 0.6667 Hz -- see projects/safs_alt.yaml.
+      partition_tol_m: 50.0
 
 default_mesh: planar
 
@@ -45,8 +49,12 @@ gate_bands:
 
 hypocenters:
   planar:
-    lon: -121.0                   # given geographically, to exercise the lon/lat path
-    lat: 36.0
+    # Given geographically, to exercise the lon/lat path.  This projects to
+    # (500000, 4005000) in EPSG:32610 -- mid-fault, ON the plane x = 500000.
+    # An earlier draft used (-121, 36), which lands 180 km east of the fault; Stage F's
+    # snap gate caught it, which is exactly what that gate is for.
+    lon: -123.0
+    lat: 36.189797
     depth_m: 8000.0
     snap_tol_m: 2000.0
     label: "demo 8 km hypocentre"

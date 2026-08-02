@@ -4,10 +4,10 @@ Build every input a SeisSol dynamic-rupture simulation needs, from **raw data**,
 fault system** — then use those freshly built files to determine the physical parameters,
 and write a folder you can run.
 
-> **Status: under construction.** Phases 0–4 of 9 are implemented, and the chain runs end to
+> **Status: under construction.** Phases 0–5 of 9 are implemented, and the chain runs end to
 > end: `python run_workflow.py --project demo_planar` builds material, plasticity, Sv,
-> stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. Mesh ingest
-> is Phase 5, deck assembly 6, the notebook 7, and the SAFS reproduction exercise 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
+> stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. Deck assembly is Phase 6, the notebook 7,
+> and the SAFS reproduction exercise 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
 
 ## The idea
 
@@ -20,7 +20,7 @@ so it is handed to a **skill document** you give to Claude.
 | material (+ plasticity, + Q) | raw CVM velocity slices | `deckbuild/material.py` **(done)** |
 | stress | raw stress-orientation data + Sv from the material | `deckbuild/stress.py` **(done)** |
 | friction | raw temperature slices, or a depth profile | `deckbuild/friction.py` **(done)** |
-| **mesh** | your fault geometry | **`skills/code-mesh-build-improve`** *(Phase 5)* |
+| **mesh** | your fault geometry | **`skills/code-mesh-build-improve`** — ingest/gating in `deckbuild/mesh.py` **(done)** |
 
 Everything fault-specific — map projection, strike direction, grid boxes, named restraining
 bends, hypocentre, which raw readers to use — lives in **one YAML per fault system** under
@@ -39,7 +39,8 @@ projects/           one descriptor per fault system
   safs_preferred.yaml San Andreas, PREFERRED geometry
   demo_planar.yaml    a synthetic example that runs with zero downloads
 docs/               the plan and the component exploration
-skills/             the mesh build-and-improve skill
+skills/             the vendored mesh build-and-improve skill (see MESHING.md)
+tools/              make_demo_mesh.py
 tests/              pytest suite
 outputs/            build artifacts (gitignored)
 data/<project>/     raw inputs and caches (gitignored, except the demo mesh)

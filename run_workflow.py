@@ -36,6 +36,8 @@ from deckbuild.friction import FrictionStage, FwDesign                  # noqa: 
 from deckbuild.material import (                                        # noqa: E402
     AttenuationSpec, MaterialStage, PlasticitySpec,
 )
+from deckbuild.mesh import MeshStage                                    # noqa: E402
+from deckbuild.stage_f import verify_mesh_against_deck                  # noqa: E402
 from deckbuild.stress import KDesign, StressStage                       # noqa: E402
 
 
@@ -133,22 +135,42 @@ def main(argv=None) -> int:
     all_ok &= wrep.ok
     man.record("friction", artifact=wart, report=wrep, wall_s=round(wdt, 3))
 
-    # -- 5. HYPOCENTRE (needs the mesh; skipped when it is absent) -------------------
-    print("\n--- [5] HYPOCENTRE  snap onto the real fault " + "-" * 33)
-    hrep = GateReport("hypocentre")
+    # -- 5. MESH: ingest and gate ----------------------------------------------------
     mesh_path = cfg.resolve_path(cfg.mesh().path)
-    if not Path(mesh_path).is_file():
-        hrep.skip("H1", f"no mesh at {mesh_path}; snapping and the on-fault gates "
-                        f"(V4/G1/M3) did not run.  Build one with the skill in skills/.")
-    else:
-        from deckbuild.geometry import load_fault, snap_hypocenter
-        fault = load_fault(cfg.mesh(), cfg.data_dir, strike=cfg.strike)
-        snap = snap_hypocenter(cfg.hypocenter(), fault, cfg.strike, cfg.crs,
-                               gate_bands=cfg.gate_bands)
-        hrep.extend(snap.report)
-    hrep.print()
-    all_ok &= hrep.ok
-    man.record("hypocenter", report=hrep)
+    have_mesh = Path(mesh_path).is_file()
+
+    def _mesh():
+        st = MeshStage()
+        if not have_mesh:
+            rep = GateReport("mesh")
+            rep.skip("A-G", f"no mesh at {mesh_path}.  This workflow INGESTS a mesh; "
+                            f"build yours with the skill in skills/ (MESHING.md).")
+            rep.print()
+            return None, rep
+        art = st.build(cfg, out)
+        rep = st.verify(cfg, art, material_nc=mat.material.path,
+                        stress_nc=sart.path, friction_nc=fart.path)
+        rep.print()
+        return art, rep
+    (meshart, mrep2), mdt2 = stage("[5] MESH      ingest -> convert / gate (A-G)", _mesh)
+    all_ok &= mrep2.ok
+    man.record("mesh", artifact=meshart, report=mrep2, wall_s=round(mdt2, 3))
+
+    # -- 6. STAGE F: is the mesh compatible with these fields? -----------------------
+    def _stage_f():
+        if not have_mesh:
+            rep = GateReport("Stage F")
+            rep.skip("F", "no mesh; the mesh-vs-deck check did not run")
+            rep.print()
+            return rep
+        rep = verify_mesh_against_deck(
+            cfg, stress_nc=sart.path, friction_nc=fart.path,
+            material_nc=mat.material.path, descriptor_sha256=cfg.sha256())
+        rep.print()
+        return rep
+    frep2, fdt2 = stage("[6] STAGE F   mesh vs the deck's actual fields", _stage_f)
+    all_ok &= frep2.ok
+    man.record("stage_f", report=frep2, wall_s=round(fdt2, 3))
 
     mpath = man.write(out)
     print("\n" + "=" * 78)

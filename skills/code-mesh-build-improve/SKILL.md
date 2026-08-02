@@ -33,7 +33,9 @@ emit Gmsh v4, trust one mmg draw, or chase a geometry-forced floor.**
   pymeshlab, h5py. mmg binary: `~/miniforge/envs/mmg/bin/mmg3d_O3`.
 - **Gmsh v2.2 ONLY** (`file_format="gmsh22"`, ASCII). MFEM's reader silently
   mis-parses v4 ("vertices indices are not unique"). Never emit msh4.
-- **Tag contract** (SAFS): working tags `fault=101[,102,103 strands]`,
+- **Tag contract** — these are the `MeshSpec.tag_to_bc` DEFAULTS in the project
+  descriptor (`projects/*.yaml`), not a universal law; a different fault system may
+  set its own. (SAFS): working tags `fault=101[,102,103 strands]`,
   `top=201, bottom=202, sides=203` (tetgen pipeline) → final SAFS tags
   `101 fault / 102 top / 103 bottom / 104 sides` (+ volume rock=1) →
   PUML BC `101→3 (dynamic rupture), 102→1 (free surface), 103/104→5 (absorbing)`.
@@ -44,6 +46,11 @@ emit Gmsh v4, trust one mmg draw, or chase a geometry-forced floor.**
   + `results/` + `build_tmp/`); never touch the production `meshing/` folder.
 
 ## Reference implementations (read these before writing new code)
+
+> **These paths are the SAFS WORKED EXAMPLES, not a dependency.** They live in the
+> legacy `seas-mfem-spatial-dyn-driver` tree and are read-only exemplars: the METHOD
+> transfers to any fault system, the paths do not. If you do not have that tree, read
+> the stage descriptions below and `MESHING.md` instead.
 
 | What | Where |
 |---|---|

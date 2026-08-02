@@ -29,6 +29,7 @@ __all__ = [
     "NamedBand",
     "Hypocenter",
     "MeshSpec",
+    "MeshGates",
     "PhysicsDefaults",
     "SourceSpec",
     "RawSources",
@@ -141,6 +142,20 @@ def _default_tag_to_bc() -> Mapping[int, int]:
 
 
 @dataclass(frozen=True)
+class MeshGates:
+    """Acceptance thresholds for a mesh.  These are PROJECT properties, not universals.
+
+    500 m / 0.6667 Hz are the SAFS production values; a demo or a different fault system
+    has its own.  Hardcoding them in the verifier would be exactly the constant leak this
+    descriptor exists to prevent.
+    """
+
+    fault_edge_max_m: float = 500.0
+    f_gate_hz: float = 0.6667      # resolved 0.5 Hz at p3: (3/4) Vs/dx >= 0.5
+    partition_tol_m: float = 50.0
+
+
+@dataclass(frozen=True)
 class MeshSpec:
     """A fault mesh.  `path` is relative to the project's data directory."""
 
@@ -149,6 +164,7 @@ class MeshSpec:
     tag_to_bc: Mapping[int, int] = field(default_factory=_default_tag_to_bc)
     daylights: bool = False
     daylight_min_depth_m: float = 0.0
+    gates: MeshGates = field(default_factory=MeshGates)
 
 
 @dataclass(frozen=True)
@@ -465,6 +481,7 @@ _FLOAT_FIELDS: dict[type, tuple[str, ...]] = {
     NamedBand: ("s_start_km", "s_end_km"),
     Hypocenter: ("x", "y", "z", "lon", "lat", "depth_m", "snap_tol_m"),
     MeshSpec: ("daylight_min_depth_m",),
+    MeshGates: ("fault_edge_max_m", "f_gate_hz", "partition_tol_m"),
     PhysicsDefaults: ("mu_shear_pa", "w_energy_m", "dc_m", "kappa_c", "l_coast_km",
                       "gap_max_km", "sn_floor_mpa", "rs_b", "rs_sl0"),
 }
@@ -533,6 +550,8 @@ def _build(dc, block, where: str, label: str):
             continue
         if f.name in _FLOAT_FIELDS.get(dc, ()) and kwargs.get(f.name) is not None:
             kwargs[f.name] = _numeric(kwargs[f.name], where, label, f.name)
+    if dc is MeshSpec and kwargs.get("gates") is not None:
+        kwargs["gates"] = _build(MeshGates, kwargs["gates"], where, f"{label}.gates")
     if dc is MeshSpec and "tag_to_bc" in kwargs and kwargs["tag_to_bc"] is not None:
         try:
             kwargs["tag_to_bc"] = _freeze(

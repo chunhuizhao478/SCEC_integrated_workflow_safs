@@ -14,10 +14,10 @@ decks/
 data/*/raw/
 data/*/cache/
 
-# large inputs: the demo mesh IS committed (see data/demo/), nothing else
+# large inputs: the demo mesh IS committed, nothing else
 data/**/*.nc
 data/**/*.puml.h5
-!data/demo/*.puml.h5
+!data/demo_planar/*.puml.h5
 
 # OS
 .DS_Store

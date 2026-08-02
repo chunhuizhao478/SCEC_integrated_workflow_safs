@@ -31,13 +31,16 @@ __all__ = [
     "FrictionStage", "FwDesign", "FrictionError",
     "MaterialStage", "MaterialArtifacts", "PlasticitySpec", "AttenuationSpec",
     "MaterialError",
+    # mesh
+    "MeshStage", "MeshError", "MeshGates", "read_puml", "write_puml", "msh_to_puml",
+    "verify_mesh_against_deck",
     # bootstrap
     "init", "Bootstrap",
 ]
 
 from deckbuild.config import (  # noqa: E402
     ConfigError, CRS, GridBox, Hypocenter, MeshSpec, NamedBand, PhysicsDefaults,
-    Project, RawSources, SourceSpec, StrikeFrame,
+    MeshGates, Project, RawSources, SourceSpec, StrikeFrame,
 )
 from deckbuild.contract import (  # noqa: E402
     Artifact, Gate, GateFailure, GateReport, HARD, Manifest, SKIP, Stage, WARN,
@@ -61,4 +64,8 @@ from deckbuild.friction import (  # noqa: E402
 from deckbuild.material import (  # noqa: E402
     AttenuationSpec, MaterialArtifacts, MaterialError, MaterialStage, PlasticitySpec,
 )
+from deckbuild.mesh import (  # noqa: E402
+    MeshError, MeshStage, msh_to_puml, read_puml, write_puml,
+)
+from deckbuild.stage_f import verify_mesh_against_deck  # noqa: E402
 from deckbuild.bootstrap import Bootstrap, init  # noqa: E402
