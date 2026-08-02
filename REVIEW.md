@@ -1,89 +1,106 @@
-# Code Review: Phase 7 — the integrated notebook and the demo project (2026-08-02)
+# Code Review: Phase 8 — the SAFS reproduction exercise (2026-08-02)
 
-Reviews for Phases 0–6 are in the git history; all 34 of their findings were fixed.
+Reviews for Phases 0–7 are in the git history; all 37 of their findings were fixed.
 
 ## Review Scope
-- Plan: `docs/PLAN_...md`, Phase 7
-- Files: `deck_workflow.ipynb`, `tests/test_notebook.py`, `pytest.ini`,
-  `data/demo_planar/demo_planar.puml.h5`, `README.md`
-- Baseline: 293 tests pass; the notebook executes end to end in ~2 s with every gate
-  battery printing and no `[FAIL]`.
+- Plan: `docs/PLAN_...md`, Phase 8
+- Files: `deckbuild/introspect.py`, `exercise_safs_reproduction.py`,
+  `tests/test_introspect.py`, `docs/EXERCISE_safs_reproduction.md`
+- Run against the real shipped deck
+  `safs_seisol_v4_0_0_RSSRW_ALT_THERMAL_CASE1_intermediate_..._deep40km`
+  (683 MB mesh, 362 MB CVM) with the real raw tree.
+- Baseline: 303 tests pass.
+
+## Result of the exercise itself
+
+| Rung | Verdict | Evidence |
+|:--|:--|:--|
+| E0 mesh | **PASS** | 3,210,006 nodes / 15,979,903 tets / 320,560 BC-3 faces, all interior |
+| E1 provenance | **PASS** | 37 CVM slices, 105 CTM slices, CSM present |
+| E2 descriptor | **PASS** | 37 fields recovered, **0 unknown** |
+| E2c freeze | **PASS** | measured on the FIELD: freeze is OFF, agreeing with the filename |
+| E3 material | **BLOCKED** | the `cvm_slices` reader is not implemented |
+| E4–E6 | **BLOCKED** | inherit E3 |
+
+**The reproduction claim is therefore UNPROVEN.** E0–E2 establish that the deck is readable
+and its design fully recoverable — the prerequisite for E3–E6, not a substitute.
 
 ## Findings
 
-### [R-701] MODERATE [deck_workflow.ipynb / run_workflow.py] — both write to the SAME deck directory
-
-**Category:** BUG
-
-**Description:**
-The notebook derives `DECK = decks/{name}_{RUN_TAG}` and `run_workflow.py` derives the
-identical path from the same tag. They do **not** produce the same deck — the notebook
-adds a `Tnuc_s` nucleation LuaMap that the CLI runner does not — yet both call
-`assemble(..., overwrite=True)`. Whichever ran last silently wins, and a user who runs the
-notebook, then the CLI, then inspects `decks/…` is looking at a deck that is not the one
-their notebook reported on.
-
-This is the same class as the legacy "shared `outputs/graded_fw/`" defect the plan cites,
-where a stale pre-edit file was copied into a deck.
-
-**Trigger:** Run the notebook, then `python run_workflow.py`, then read the deck.
-
-**Suggested fix:** Make the producer part of the path, and record it.
-```diff
--DECK = B.root / "decks" / f"{cfg.name}_{RUN_TAG}"
-+DECK = B.root / "decks" / f"{cfg.name}_{RUN_TAG}_nb"     # _nb: the notebook's own deck
-```
-and in `run_workflow.py`:
-```diff
--    deck = ROOT / "decks" / f"{cfg.name}_{tag}"
-+    deck = ROOT / "decks" / f"{cfg.name}_{tag}_cli"
-```
-
----
-
-### [R-702] LOW [deck_workflow.ipynb] — the notebook re-derives paths the runner already computes
-
-**Category:** QUALITY
-
-**Description:**
-Section [1] hand-builds `OUT` and `DECK` and `mkdir`s the subdirectories, duplicating
-`run_workflow.py`. The two can drift — and R-701 is exactly that drift. A shared helper
-(`deckbuild.layout.run_paths(cfg, tag, producer)`) would make one the definition and the
-other a caller.
-
-Not fixed now: it is a refactor, and the plan's rule is to implement the phase, not
-restructure. Recorded for Phase 9's cleanup.
-
----
-
-### [R-703] LOW [tests/test_notebook.py] — the execution test does not assert the deck it produced
+### [R-801] MODERATE [material.py] — `cvm_slices` / `ctm_slices` block the whole exercise
 
 **Category:** DEVIATION
 
 **Description:**
-`test_notebook_runs_end_to_end_under_five_minutes` asserts the gate text and the wall
-clock, but not that a deck folder now exists with the expected files. A notebook that
-printed every gate and then failed to write anything would pass.
+`VELOCITY_READERS` contains only `layered_1d`; `cvm_slices` raises "not implemented yet",
+and the `ctm_slices` thermal path likewise. The plan's Phase 4 requirement 1 specifies the
+two-stage raw pipeline (slice read → reproject → inscribed UTM grid → per-slice
+`LinearNDInterpolator` → depth-to-elevation flip → moduli at source nodes → z-resample),
+and Phase 8's E3 depends on it.
 
-**Suggested fix:** Assert the deck directory and its manifest exist after the run.
+Raising is the right *interim* behaviour — it is strictly better than silently producing a
+wrong field — but it means the plan's central acceptance test cannot run.
+
+**Suggested fix:** Implement `_cvm_slices` and `_ctm_slices` in `material.py`, porting the
+legacy `generate_velocity_nc_from_raw.py` / `generate_thermal_nc_from_raw.py` verbatim.
+Then re-run the ladder; expect E3 to be the rung that reveals whether scipy's Delaunay
+matches the version the shipped nc was built with (the plan's "might not match" category).
+
+**Estimated scope:** ~200 lines and one expensive test (452×361×194 grid from 37 slices).
+
+---
+
+### [R-802] LOW [exercise_safs_reproduction.py] — E1 does not actually prove correspondence
+
+**Category:** ASSUMPTION
+
+**Description:**
+E1 counts the raw slices and prints the shipped nc's shape, then reports PASS. It does not
+compare the slices' lon/lat extent or depth levels against the nc's axes, so it establishes
+*availability*, not *correspondence* — which is what the rung is named for.
+
+The honest reading of the current PASS is "the raw inputs are present and plausibly the
+right products", and the evidence string says the slice count and the z-level count need
+not match. It should say what it did NOT check.
+
+**Suggested fix:** Either compare the reprojected slice hull against the nc's x/y extent,
+or rename the rung's verdict to `PARTIAL` with an explicit "correspondence not verified".
+
+---
+
+### [R-803] LOW [introspect.py:_parse_tnuc] — the z-sign parse is fragile
+
+**Category:** EDGE_CASE
+
+**Description:**
+The hypocentre's z is recovered from `dz = x["z"] + 10067.9819` by string-inspecting the
+sign. It happens to be right for the shipped deck (verified: `-10067.9819`), but it depends
+on the emitter writing `+` for a negative z. A generated Lua that wrote
+`x["z"] - -10067.98` would parse wrong.
+
+**Suggested fix:** Evaluate the arithmetic rather than inspecting the sign character, or
+require the emitter's exact form and assert it.
 
 ---
 
 ## Summary
-- Critical: 0 | Moderate: 1 (R-701) | Low: 2 (R-702, R-703)
-- Plan compliance: **FULL** — eight sections, one assignments-only PARAMETERS cell each,
-  physics stated before the code, the demo running with zero downloads and no gmsh under
-  the 5-minute budget, section [2] explicit that it ingests rather than builds, and the
-  retarget checklist in the README.
-- Verdict: **PASS WITH FIXES** — R-701 and R-703 fixed in this round.
+- Critical: 0 | Moderate: 1 (R-801) | Low: 2 (R-802, R-803)
+- Plan compliance: **PARTIAL** — the introspector, the ladder harness, the
+  declared-before-comparison categories, and the results document all exist and work; the
+  ladder itself stops at E3 for a named, recorded reason.
+- Verdict: **PASS WITH A BLOCKING GAP** — nothing here is wrong, but Phase 8's purpose is
+  not yet served. R-801 must be closed before the workflow can claim reproduction.
 
 ## Checked and found correct
-- All 20 PARAMETERS values are actually consumed downstream (probed by counting
-  references); none is decorative.
-- Every PARAMETERS cell parses to assignments only — no logic hidden where a user edits.
-- The notebook contains no absolute path and no network access of any kind.
-- Material precedes stress and friction, and the intro says why the order is load-bearing.
-- The six gotchas that cost real runs are stated in the prose the user reads: the dropped
-  `z = 0` receiver, the silently-ignored spatial `rs_muw`, `bulkFriction` being a
-  coefficient, kappa being necessary-not-sufficient, sea-level depth referencing, and the
-  strike-slip assumption behind the Andersonian closure.
+- The introspector recovers **37 fields with zero unknowns** from a real deck, including
+  three that exist only as literals inside emitted Lua: the strike azimuth (314.0) and
+  origin (606971, 3707270) from the `rs_muw` coefficients, and the hypocentre
+  (604446.944, 3704576.3853, −10067.9819) from `Tnuc_s`.
+- The 7-region `f_w` design read out of the Lua matches the shipped yaml's own filename,
+  value for value: `[0, 0, 0.045, 0.03, 0.06, 0.0175, 0.05]`.
+- `phi` is read from `bulkFriction = tan(phi)` in the FIELD, not from the yaml prose —
+  giving 30/40, the production values, not Roten's 35/45.
+- The shallow freeze is verified **against the field**, not the filename, exactly as the
+  plan requires. Both agree: it is off for this deck.
+- The four grids are confirmed independent on the real deck: material 1500/250,
+  stress 1000/250, friction 1500/200.
