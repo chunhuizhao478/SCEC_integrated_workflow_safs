@@ -4,10 +4,10 @@ Build every input a SeisSol dynamic-rupture simulation needs, from **raw data**,
 fault system** — then use those freshly built files to determine the physical parameters,
 and write a folder you can run.
 
-> **Status: under construction.** Phase 0 of 9 is implemented (the package scaffold, the
-> project descriptor, and the stage contract). The physics stages land in Phases 1–6, the
-> notebook in Phase 7, and the SAFS reproduction exercise in Phase 8. The full plan is
-> `docs/PLAN_integrated_workflow_notebook_2026-08-01.md` (also as a PDF).
+> **Status: under construction.** Phases 0–2 of 9 are implemented: the package scaffold and
+> project descriptor, the shared geometry/ASAGI layers, and the stress stage. Friction,
+> material and mesh land in Phases 3–5, deck assembly in 6, the notebook in 7, and the SAFS
+> reproduction exercise in 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
 
 ## The idea
 
@@ -18,7 +18,7 @@ so it is handed to a **skill document** you give to Claude.
 | Ingredient | Built from | Owner |
 |:--|:--|:--|
 | material (+ plasticity, + Q) | raw CVM velocity slices | `deckbuild/material.py` *(Phase 4)* |
-| stress | raw stress-orientation data + Sv from the material | `deckbuild/stress.py` *(Phase 2)* |
+| stress | raw stress-orientation data + Sv from the material | `deckbuild/stress.py` **(done)** |
 | friction | raw temperature slices, or a depth profile | `deckbuild/friction.py` *(Phase 3)* |
 | **mesh** | your fault geometry | **`skills/code-mesh-build-improve`** *(Phase 5)* |
 

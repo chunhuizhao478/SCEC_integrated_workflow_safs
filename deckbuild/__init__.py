@@ -24,6 +24,9 @@ __all__ = [
     # asagi
     "AsagiError", "write_asagi", "read_asagi", "trilinear_sample",
     "hull_containment", "roundtrip_selfcheck",
+    # stress
+    "StressStage", "KDesign", "StressError",
+    "OrientationField", "read_orientation", "OrientationError",
     # bootstrap
     "init", "Bootstrap",
 ]
@@ -44,4 +47,8 @@ from deckbuild.asagi import (  # noqa: E402
     AsagiError, hull_containment, read_asagi, roundtrip_selfcheck, trilinear_sample,
     write_asagi,
 )
+from deckbuild.orientation import (  # noqa: E402
+    OrientationError, OrientationField, read_orientation,
+)
+from deckbuild.stress import KDesign, StressError, StressStage  # noqa: E402
 from deckbuild.bootstrap import Bootstrap, init  # noqa: E402

@@ -1,261 +1,216 @@
-# Code Review: Phase 1 — geometry and ASAGI I/O (2026-08-01)
+# Code Review: Phase 2 — the stress stage (2026-08-01)
 
-Phase 0's review is in the git history (commit `9fd3394`); all seven of its findings were
-fixed before this phase started.
+Phases 0 and 1 reviews are in the git history (`9fd3394`, `3866c65`); all twelve of their
+findings were fixed.
 
 ## Review Scope
-- Plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`, Phase 1
-- Files reviewed: `deckbuild/geometry.py`, `deckbuild/asagi.py`, `tests/nc_compare.py`,
-  `tests/test_geometry.py`, `tests/test_asagi.py`, `deckbuild/__init__.py`
-- Domain context: the legacy `generate_stress_nc_from_raw.py` (the source of every ported
-  expression), and the exploration doc's convention and gotcha sections.
-- Baseline: 139/139 tests pass, including three 0-ULP comparisons against the real legacy
-  module. The findings below are not caught by that suite.
+- Plan: `docs/PLAN_...md`, Phase 2
+- Files: `deckbuild/stress.py`, `deckbuild/orientation.py`, `tests/test_stress.py`
+- Baseline: 182/182 tests pass.
 
 ## Findings
 
-### [R-101] MODERATE [geometry.py:Fault] — comparing two Fault objects raises ValueError
+### [R-201] MODERATE [stress.py:_apply_daylight_patch] — the daylight patch is a constant slab, not the per-column topographic overburden
+
+**Category:** DEVIATION
+
+**Description:**
+The legacy `step6_write_nc._apply_daylight_patch` takes a `daylight_mesh` and reads the
+BC-1 free surface to get `z_topo(x, y)`, then fills each column's `z >= 0` levels with that
+column's own overburden. This implementation fills every `z >= 0` level with a **single
+constant slab** evaluated at one depth.
+
+For the SAFS PREFERRED fault — which daylights to +2209 m under +3 km of topography — those
+are not the same field. The shipped `safs_stress_andersonian_*.nc` for PREFERRED was built
+the legacy way, so Phase 8's E4 rung **cannot** reproduce it data-identically with this
+implementation.
+
+It is correct for a flat-top domain (ALT), which is why every current test passes.
+
+**Trigger:** Build a PREFERRED-style project with `daylight_patch=True` and compare against
+a shipped PREFERRED stress nc.
+
+**Actual behavior:** One constant slab above `z = 0`.
+
+**Expected behavior:** Per-column fill at the local topographic depth.
+
+**Suggested fix:** Take the mesh, extract the free surface, and evaluate per column.
+```diff
+-def _apply_daylight_patch(comps, gz, depth_grid, sv_grid, az_col, R_col, k_col,
+-                          nx, ny, min_depth_m):
++def _apply_daylight_patch(comps, gz, depth_grid, sv_grid, az_col, R_col, k_col,
++                          nx, ny, min_depth_m, colx=None, coly=None, topo=None):
+```
+where `topo(colx, coly) -> z_topo` comes from the mesh's BC-1 faces, and the per-column
+depth is `max(min_depth_m, z_topo - z_level)`. Until that lands, the limitation must be
+stated in the module docstring and the build must **refuse** `daylight_patch=True` when no
+topography source is supplied, rather than silently writing the flat-top approximation.
+
+**Test case:**
+```python
+def test_R201_daylight_patch_requires_a_topography_source(demo, sv, tmp_path):
+    with pytest.raises(StressError, match="topograph"):
+        StressStage().build(demo, tmp_path, sv_profile=sv, k=1.7,
+                            daylight_patch=True)
+```
+
+---
+
+### [R-202] MODERATE [stress.py:StressStage.verify] — a corrupt mesh is reported as a skipped gate
 
 **Category:** BUG
 
 **Description:**
-`Fault` is `@dataclass(frozen=True)` holding numpy arrays. The generated `__eq__` compares
-field tuples, which for arrays yields elementwise arrays and then an ambiguous truth value.
-Verified:
-
-```
-a, b = mk(), mk()          # two distinct, element-wise identical Faults
-bool(a == b)  ->  ValueError: The truth value of an array with more than one element is ambiguous
-hash(a)       ->  TypeError: unhashable type: 'numpy.ndarray'
-```
-
-`a == a` happens to work (tuple comparison short-circuits on identity), which is why no
-current test caught it. Any code that compares two independently loaded faults — an obvious
-thing for Phase 5's "fault identity vs the deployed mesh" check, and for Phase 8's
-reproduction diffing — hits this.
-
-**Trigger:** `load_fault(m) == load_fault(m)`.
-
-**Actual behavior:** `ValueError`.
-
-**Expected behavior:** Either a correct elementwise-aware comparison, or no `__eq__` at all
-(identity), which is the honest choice for a bulk array container.
-
-**Suggested fix:** Disable the generated `__eq__`/`__hash__` and provide an explicit,
-named comparison so the intent is unambiguous at the call site.
-```diff
--@dataclass(frozen=True)
-+@dataclass(frozen=True, eq=False)
- class Fault:
-```
-and add:
 ```python
-    def same_geometry_as(self, other: "Fault", tol: float = 0.0) -> bool:
-        """True when both faults have identical facet centroids and normals."""
-        if len(self) != len(other):
-            return False
-        if tol == 0.0:
-            return (np.array_equal(self.cent, other.cent)
-                    and np.array_equal(self.normals, other.normals))
-        return (np.allclose(self.cent, other.cent, rtol=0, atol=tol)
-                and np.allclose(self.normals, other.normals, rtol=0, atol=tol))
+try:
+    fault = load_fault(...)
+except Exception as exc:
+    rep.skip("V4", f"fault mesh unavailable ({type(exc).__name__})")
+```
+The bare `except Exception` cannot tell "no mesh file here" from "the mesh is corrupt", "the
+BC map is wrong", or "there are no BC-3 faces". All four become a skip, and `report.ok`
+stays True. The contract everywhere else in this package is that a skip is for a genuinely
+absent optional input — a broken input must fail.
+
+**Trigger:** `verify()` against a project whose mesh exists but has the wrong `fault_bc`.
+
+**Actual behavior:** `[ -- ] V4: fault mesh unavailable (GeometryError)`, `ok == True`.
+
+**Expected behavior:** absent mesh -> skip; present-but-unusable mesh -> HARD fail.
+
+**Suggested fix:**
+```diff
+-        try:
+-            fault = load_fault(cfg.mesh(), cfg.data_dir, strike=cfg.strike)
+-        except Exception as exc:
+-            rep.skip("V4", f"fault mesh unavailable ({type(exc).__name__}); "
+-                           f"the on-fault screen did not run")
+-            return rep
++        mesh_path = cfg.resolve_path(cfg.mesh(mesh_name).path)
++        if not Path(mesh_path).is_file():
++            rep.skip("V4", f"no mesh at {mesh_path}; the on-fault screen did not run")
++            return rep
++        try:
++            fault = load_fault(cfg.mesh(mesh_name), cfg.data_dir, strike=cfg.strike)
++        except Exception as exc:                     # present but unusable -> FAIL
++            rep.add("V4", False,
++                    f"mesh {mesh_path} exists but could not be read: "
++                    f"{type(exc).__name__}: {exc}")
++            return rep
 ```
 
 **Test case:**
 ```python
-def test_R101_fault_comparison_does_not_raise(planar_mesh):
-    a = load_fault(planar_mesh, strike=SAFS_STRIKE)
-    b = load_fault(planar_mesh, strike=SAFS_STRIKE)
-    assert a is not b
-    assert (a == b) is False          # identity semantics, no exception
-    assert a.same_geometry_as(b)
+def test_R202_corrupt_mesh_fails_v4_rather_than_skipping(demo, sv, tmp_path):
+    bad = tmp_path / "data" / "demo_planar.puml.h5"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(b"not an hdf5 file")
+    art = StressStage().build(demo, tmp_path, sv_profile=sv, k=1.7,
+                              freeze_above_depth_m=0.0)
+    rep = StressStage().verify(demo, art)
+    v4 = [g for g in rep.gates if g.name == "V4"][0]
+    assert v4.severity == "hard" and not v4.passed
 ```
 
 ---
 
-### [R-102] MODERATE [asagi.py:roundtrip_selfcheck] — the max-error gate can never fail, deviating from the legacy G3 contract
+### [R-203] MODERATE [tests/test_stress.py] — the demo's parameters make `s_xx` blind to k, so a broken grading would pass
 
-**Category:** DEVIATION
+**Category:** EDGE_CASE
 
 **Description:**
-The legacy G3 guard is: median within `1e-5` (hard); max is **WARN-only at `5e-4`
-PROVIDED every excursion sits in a grid cell whose corners straddle a kink in the source
-field**. A `>5e-4` excursion in a kink-free cell **is a hard fail** — the exploration doc
-records this explicitly as "a real bug".
+The demo project has `R = 0.5` and SHmax `az = 45`. For that combination the xx component
+is **algebraically independent of k**:
 
-The implementation drops the proviso and marks the max gate `WARN` unconditionally, so the
-hard case is unreachable. A genuine interpolation bug in a smooth region would report as a
-warning and pass.
-
-**Trigger:** Any grid whose stored values disagree with the evaluator by more than
-`max_tol` in a smooth region.
-
-**Actual behavior:** `[WARN]`, and `report.ok` is True.
-
-**Expected behavior:** hard fail unless the caller can attest the excursion is kink-related.
-
-**Suggested fix:** Take an optional predicate; when it is not supplied, the max gate is
-HARD (the safe default), and the caller opts into leniency explicitly.
-```diff
- def roundtrip_selfcheck(path, evaluator, field, n=1000, seed=12345,
-                         median_tol=1e-5, max_tol=5e-4,
--                        gate="G3", report=None, bbox=None):
-+                        gate="G3", report=None, bbox=None,
-+                        kink_straddling=None):
 ```
-```diff
--    rep.add(f"{gate}max", mx <= max_tol,
--            f"...",
--            severity=WARN)
-+    if mx <= max_tol:
-+        rep.add(f"{gate}max", True, f"{field}: max |nc - direct| = {mx:.3e} "
-+                f"(tol {max_tol:.0e})")
-+    else:
-+        bad = np.flatnonzero(err > max_tol)
-+        excused = (kink_straddling is not None
-+                   and bool(np.all(kink_straddling(pts[bad]))))
-+        rep.add(f"{gate}max", excused,
-+                f"{field}: max |nc - direct| = {mx:.3e} > tol {max_tol:.0e} at "
-+                f"{bad.size} point(s); "
-+                + ("all sit in cells straddling a kink in the source field, which is "
-+                   "expected for a piecewise-linear field"
-+                   if excused else
-+                   "no kink_straddling predicate was supplied, so these are treated as "
-+                   "real interpolation errors"),
-+                severity=WARN if excused else HARD)
+sigma_xx = sig1 sin^2(45) + sig3 cos^2(45) = 0.5 (sig1 + sig3) = 0.5 sig3 (1 + k)
+sig3     = Sv / ((1-R)k + R) = 2 Sv / (k + 1)      when R = 0.5
+=> sigma_xx = Sv      for every k
 ```
+
+Measured: a graded build with `k = 1.2 -> 2.4` gives `s_xx = -166.77 MPa` at every column.
+So a test that probes `s_xx` for lateral variation proves nothing, and a regression that
+silently dropped the grading entirely would still pass the current suite. The eigenvalue
+test (`test_built_field_reproduces_the_closure_ratio`) does constrain k, but only for the
+uniform case.
+
+`s_xy` is not degenerate: `sigma_xy = Sv (k - 1) / (k + 1)`, which I verified matches the
+build to 3 decimal places at both plateaus.
+
+**Suggested fix:** Add an analytic grading test on `s_xy`.
 
 **Test case:**
 ```python
-def test_R102_large_smooth_excursion_is_a_hard_fail(nc):
-    p = nc[0]
-    rep = roundtrip_selfcheck(p, lambda pts: np.zeros(len(pts)), field="f",
-                              n=50, median_tol=1e9, max_tol=1e-6)
-    assert not rep.ok, "a large excursion with no kink excuse must fail HARD"
-
-def test_R102_kink_excuse_downgrades_to_warn(nc):
-    p = nc[0]
-    rep = roundtrip_selfcheck(p, lambda pts: np.zeros(len(pts)), field="f",
-                              n=50, median_tol=1e9, max_tol=1e-6,
-                              kink_straddling=lambda pts: np.ones(len(pts), bool))
-    assert rep.ok
+def test_R203_graded_k_varies_the_field_analytically(demo, sv, tmp_path):
+    """R=0.5, az=45 makes s_xx k-INVARIANT; s_xy is the component that moves."""
+    d = KDesign(k_values=(1.2, 2.4), boundaries_s_km=((20.0, 30.0),))
+    art = StressStage().build(demo, tmp_path, sv_profile=sv, design=d,
+                              freeze_above_depth_m=0.0)
+    _, _, z, f, _ = read_asagi(art.path)
+    kz = int(np.argmin(np.abs(z - (-10000.0))))
+    row = f["s_xy"][kz].mean(axis=1) / 1e6
+    Sv = 1700.0 * 9.81 * 10000.0 / 1e6
+    assert row[0] == pytest.approx(-Sv * (1.2 - 1) / (1.2 + 1), abs=0.05)
+    assert row[-1] == pytest.approx(-Sv * (2.4 - 1) / (2.4 + 1), abs=0.05)
 ```
 
 ---
 
-### [R-103] MODERATE [tests/test_asagi.py] — acceptance criterion 5 is not tested against a shipped nc
+### [R-204] LOW [stress.py:_project_onto_fault] — an obfuscated dynamic import
 
-**Category:** DEVIATION
+**Category:** QUALITY
 
 **Description:**
-Phase 1's fifth acceptance criterion is: *"`trilinear_sample` on the shipped
-`safs_stress_andersonian_k1.7.nc` matches the legacy
-`generate_stress_nc_from_raw.trilinear_sample` to 0 ULP at 1000 fixed-seed points."*
-
-The suite tests trilinear behaviour only on synthetic grids. I confirmed 0-ULP agreement
-against the legacy function manually on a synthetic compound nc, but the criterion names a
-real shipped file, whose axes are non-trivial (69 z-levels, 250 m spacing, a daylight
-extension) and whose values are float32 at ~1e7 Pa — a regime the synthetic test does not
-cover.
-
-**Trigger:** n/a — a missing test.
-
-**Suggested fix:** Add a skipif-gated test that uses a shipped deck when present.
 ```python
-DECK = Path(os.environ.get("DECKBUILD_DECKS", Path.home() / "Downloads/seisol_quakeworx"))
-SHIPPED_STRESS = next(DECK.glob("*/safs_stress_andersonian_k1.7.nc"), None) if DECK.is_dir() else None
+_, _, zg = (np.asarray(a) for a in __import__(
+    "deckbuild.asagi", fromlist=["asagi_axes"]).asagi_axes(nc_path))
+```
+`asagi_axes` is already imported at the top of the function's module neighbours; this
+construct hides the dependency and is hard to read for no benefit.
 
-@pytest.mark.skipif(SHIPPED_STRESS is None, reason="shipped deck not available")
-def test_R103_trilinear_matches_legacy_on_the_shipped_nc():
-    legacy = _load_legacy()
-    x, y, z = asagi_axes(SHIPPED_STRESS)
-    rng = np.random.default_rng(12345)
-    qx = rng.uniform(x[0], x[-1], 1000)
-    qy = rng.uniform(y[0], y[-1], 1000)
-    qz = rng.uniform(z[0], z[-1], 1000)
-    mine = trilinear_sample(SHIPPED_STRESS, qx, qy, qz)
-    theirs = legacy.trilinear_sample(str(SHIPPED_STRESS), qx, qy, qz)
-    for f in theirs:
-        assert np.array_equal(mine[f], theirs[f]), f
+**Suggested fix:**
+```diff
+-    from deckbuild.asagi import trilinear_sample
++    from deckbuild.asagi import asagi_axes, trilinear_sample
+     from deckbuild.geometry import resolve_tractions
+-    _, _, zg = (np.asarray(a) for a in __import__(
+-        "deckbuild.asagi", fromlist=["asagi_axes"]).asagi_axes(nc_path))
++    _, _, zg = asagi_axes(nc_path)
 ```
 
 ---
 
-### [R-104] LOW [geometry.py:project_point] — documented deviation from the plan's topo-relative depth
+### [R-205] LOW [stress.py:StressStage.verify] — V1 is always reported as skipped
 
-**Category:** DEVIATION
-
-**Description:**
-The plan's `Hypocenter.depth_m` comment says "positive down; converted to z with the local
-topo". `project_point` uses `z = -depth_m`, i.e. sea-level referencing, and says so in its
-docstring.
-
-This is the right call — the local topographic elevation lives on the mesh free surface,
-which this function does not receive, and the SAFS descriptors are already sea-level
-referenced. But the deviation is currently only visible to someone reading the function.
-Anyone giving a catalogue depth for a fault under significant topography will be off by the
-local elevation (up to ~3 km for the PREFERRED domain).
-
-**Suggested fix:** Surface it where a user will see it — in the `Hypocenter` docstring in
-`config.py`, and in the snap `GateReport` detail when the geographic path is used.
-```diff
-     depth_m: float | None = None
-```
-```diff
--    Give EITHER projected coords (x, y, z) OR geographic (lon, lat, depth_m); the loader
--    converts via `Project.crs`.
-+    Give EITHER projected coords (x, y, z) OR geographic (lon, lat, depth_m); the loader
-+    converts via `Project.crs`.  `depth_m` is referenced to SEA LEVEL (z = -depth_m), not
-+    to the local ground surface -- under topography those differ by the local elevation.
-```
-
----
-
-### [R-105] LOW [asagi.py:write_asagi] — an undocumented extra check that could reject a legitimate field
-
-**Category:** ASSUMPTION
+**Category:** QUALITY
 
 **Description:**
-`write_asagi` rejects any field containing a non-finite value. The plan does not ask for
-this. It is defensive and almost certainly right (a NaN in an ASAGI grid propagates into
-every element that samples it), but it is an added constraint: a stage that legitimately
-wants a NaN sentinel — for instance a masked region outside a model's coverage — cannot
-write one, and will discover this only at write time.
+`verify()` unconditionally emits `rep.skip("V1", ...)`. The real V1 lives in
+`verify_regions()`, which the tests exercise. That is a defensible split (V1 needs the Sv
+profile and a scratch directory, which `verify` does not take), but a reader of a
+`GateReport` sees `V1 skipped` with no indication that a real V1 ran elsewhere.
 
-**Suggested fix:** Keep the check (it is the safer default) but make it opt-out, so the
-constraint is a decision rather than an accident.
-```diff
- def write_asagi(path, x, y, z, fields, attrs=None, dtype=np.float32):
-+                # allow_nonfinite: ASAGI propagates NaN into every element that samples
-+                # the grid, so this defaults to False.
-```
-Add `allow_nonfinite: bool = False` and gate the check on it.
+**Suggested fix:** Make the skip detail point at the method that does run it, and have
+`verify_regions` return a report that can be merged, so a caller can present one battery.
+The detail already names `verify_regions`; add a note that the merged form is the complete
+V1–V4 and reference it from the stage docstring.
 
 ---
 
 ## Summary
-- Critical issues: 0
-- Moderate issues: 3  (R-101, R-102, R-103)
-- Low issues: 2       (R-104, R-105)
-- Plan compliance: **PARTIAL** — every Phase 1 interface exists and four of five acceptance
-  criteria are tested and pass; criterion 5 (0 ULP on the *shipped* nc) is untested
-  (R-103), and the G3 max-error semantics deviate from the legacy contract (R-102).
-- Verdict: **PASS WITH FIXES** — none of these block Phase 2 from starting, but R-102
-  should be fixed before any stage relies on `roundtrip_selfcheck` as a real gate, which
-  Phases 3 and 4 both will.
+- Critical: 0 | Moderate: 3 (R-201, R-202, R-203) | Low: 2 (R-204, R-205)
+- Plan compliance: **PARTIAL** — the closure, grading, freeze and V1–V4 names are all in
+  place and correct, but the daylight patch is a flat-top approximation of the legacy
+  per-column treatment (R-201), which blocks PREFERRED reproduction in Phase 8.
+- Verdict: **PASS WITH FIXES** — R-201 and R-202 must be fixed before Phase 8; R-203 before
+  anyone trusts the grading tests.
 
-## Notes on things that were checked and found correct
-- `strike_s_km` is 0 ULP against the legacy `strike_distance_km` over 10,000 random points,
-  and reproduces the two Lua coefficients that appear in every shipped `rs_muw` map.
-- `load_fault` reproduces the legacy centroids, normals, areas, strikes and dips exactly on
-  a synthetic mesh.
-- `trilinear_sample` is 0 ULP against the legacy function on a synthetic compound nc
-  (see R-103 for the shipped-file gap).
-- The `_reload_package` fix from Phase 0 holds, and the test-isolation problem it caused
-  (reload replaces class objects, breaking `except` for other modules' bound references)
-  is fixed by running that probe in a subprocess and is documented in `bootstrap.py`.
-
-## Unreviewed Areas
-- The Colab branch of `bootstrap.init()` — still unexercisable on this machine.
-- `nc_compare._axes_and_fields` reads non-compound variables into the field set. Correct
-  for comparison, but no shipped file exercises that path yet.
+## Checked and found correct
+- `magnitudes_C1` and `build_tensor_andersonian` are verbatim ports; the built tensor's
+  horizontal eigenvalue ratio equals k to 2e-3 (float32 storage), sigma2 is exactly
+  vertical, and the eigenvalues are exactly (sig3, sig2, sig1).
+- Array orientation: fields are written `(nz, ny, nx)` and a graded design varies along the
+  correct axis, verified against the closed form `sigma_xy = Sv (k-1)/(k+1)`.
+- The freeze touches only the shallow band: below the freeze depth a frozen and an unfrozen
+  build are bit-identical, and `mu_app` is preserved inside the band.
+- SHmax is interpolated as a doubled-angle unit vector, so the 179/1 wrap gives 0, not 90.
