@@ -156,7 +156,58 @@ def _layered_1d(cfg: Project, p):
     return gx, gy, gz, {"rho": bc(rho), "mu": bc(mu), "lambda": bc(lam)}
 
 
-VELOCITY_READERS = {"layered_1d": _layered_1d}
+def _cvm_slices(cfg: Project, p, path_glob=None):
+    """Raw CVM horizontal slices -> {rho, mu, lambda} on a uniform grid.
+
+    RULE 1 in action: the moduli are formed AT THE SOURCE NODES and only then
+    z-resampled.  interp_slices is therefore asked for vp/vs/rho, and the conversion
+    happens on the SLICE stack before the vertical resample -- not after.
+    """
+    from deckbuild.rawslices import interp_slices
+    paths = sorted(Path(cfg.data_dir).glob(path_glob)) if path_glob else []
+    if not paths:
+        raise MaterialError(
+            f"no CVM slices matched {path_glob!r} under {cfg.data_dir}")
+    cols = list(p.get("columns", ["lon", "lat", "vp", "vs", "density"]))[2:]
+    gx, gy, gz, f3, info = interp_slices(
+        paths, cfg.crs, cols,
+        grid_dx=float(p.get("grid_dx", 1500.0)),
+        z_min=float(p.get("z_min", -45000.0)), z_max=float(p.get("z_max", 100.0)),
+        dz=float(p.get("dz", 250.0)),
+        extend_z_top=float(p.get("extend_z_top", 100.0)),
+        expect_spacing_m=p.get("expect_spacing_m"))
+    vp, vs, rho = (f3[c] for c in cols)
+    mu = rho * vs ** 2
+    lam = rho * (vp ** 2 - 2.0 * vs ** 2)
+    if not np.all(lam > 0):
+        bad = int((lam <= 0).sum())
+        i = int(np.argmin(lam))
+        raise MaterialError(
+            f"M1: lambda = rho(Vp^2 - 2Vs^2) <= 0 at {bad} node(s); worst at flat index "
+            f"{i} (Vp={vp.ravel()[i]:.1f}, Vs={vs.ravel()[i]:.1f}, "
+            f"rho={rho.ravel()[i]:.1f}).  This is a bad velocity model, not a code bug.")
+    return gx, gy, gz, {"rho": rho, "mu": mu, "lambda": lam}
+
+
+def _ctm_slices(cfg: Project, p, path_glob=None):
+    """Raw CTM temperature slices -> {T} on a uniform grid."""
+    from deckbuild.rawslices import interp_slices
+    paths = sorted(Path(cfg.data_dir).glob(path_glob)) if path_glob else []
+    if not paths:
+        raise MaterialError(f"no CTM slices matched {path_glob!r} under {cfg.data_dir}")
+    cols = list(p.get("columns", ["Lon", "Lat", "Temperature"]))[2:]
+    gx, gy, gz, f1, info = interp_slices(
+        paths, cfg.crs, cols,
+        grid_dx=float(p.get("grid_dx", 1500.0)),
+        z_min=float(p.get("z_min", -21000.0)), z_max=float(p.get("z_max", 0.0)),
+        dz=float(p.get("dz", 200.0)),
+        extend_z_top=float(p.get("extend_z_top", 200.0)),
+        expect_spacing_m=p.get("expect_spacing_m", 200.0))
+    return gx, gy, gz, {"T": f1[cols[0]]}
+
+
+VELOCITY_READERS = {"layered_1d": _layered_1d, "cvm_slices": _cvm_slices}
+THERMAL_READERS = {"ctm_slices": _ctm_slices}
 
 
 # --------------------------------------------------------------------------- the stage
@@ -174,7 +225,9 @@ class MaterialStage(Stage):
             raise MaterialError(
                 f"velocity kind {spec.kind!r} is not implemented yet; have "
                 f"{sorted(VELOCITY_READERS)}")
-        gx, gy, gz, flds = VELOCITY_READERS[spec.kind](cfg, dict(spec.params))
+        rd = VELOCITY_READERS[spec.kind]
+        gx, gy, gz, flds = (rd(cfg, dict(spec.params), spec.path)
+                            if spec.kind == "cvm_slices" else rd(cfg, dict(spec.params)))
 
         out = MaterialArtifacts()
         mpath = out_dir / f"{prefix}material.nc"
@@ -216,9 +269,15 @@ class MaterialStage(Stage):
                                      provenance={"material_sha256": out.material.sha256})
 
         if thermal and cfg.raw.thermal is not None and cfg.raw.thermal.kind == "ctm_slices":
-            raise MaterialError(
-                "the ctm_slices reader is not implemented yet; use a depth_profile "
-                "thermal source, or pass thermal=False and supply the nc directly")
+            ts = cfg.raw.thermal
+            tx, ty, tz, tf = _ctm_slices(cfg, dict(ts.params), ts.path)
+            tpath = out_dir / f"{prefix}thermal_T.nc"
+            write_asagi(tpath, tx, ty, tz, tf, dtype=dtype, attrs={
+                "title": f"{cfg.name} temperature", "source": "ctm_slices",
+                "units": "degC", "project": cfg.name, "crs": cfg.crs.epsg})
+            out.thermal = Artifact.of(tpath, kind="thermal",
+                                      params={"source": "ctm_slices"},
+                                      provenance={"descriptor_sha256": cfg.sha256()})
 
         if attenuation is not None:
             out.attenuation = {"qs_over_vs": attenuation.qs_over_vs,

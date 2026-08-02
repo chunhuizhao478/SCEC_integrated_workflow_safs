@@ -308,7 +308,8 @@ def test_sv_profile_cache_key_tracks_the_material(demo, tmp_path):
     assert Path(a.sv_profile.path).name != Path(b.sv_profile.path).name
 
 
-def test_unimplemented_readers_say_so(demo, tmp_path):
+def test_cvm_reader_with_no_matching_slices_says_so(demo, tmp_path):
+    """The cvm_slices reader IS implemented (Phase 8 R-801); an empty glob must be loud."""
     import yaml
     raw = yaml.safe_load((PROJECTS / "demo_planar.yaml").read_text())
     raw["raw"]["velocity"]["kind"] = "cvm_slices"
@@ -316,7 +317,7 @@ def test_unimplemented_readers_say_so(demo, tmp_path):
     p = tmp_path / "cvm.yaml"
     p.write_text(yaml.safe_dump(raw))
     cfg = Project.load(p, require_files=False, data_dir=tmp_path)
-    with pytest.raises(MaterialError, match="not implemented yet"):
+    with pytest.raises(MaterialError, match="no CVM slices matched"):
         MaterialStage().build(cfg, tmp_path)
 
 
