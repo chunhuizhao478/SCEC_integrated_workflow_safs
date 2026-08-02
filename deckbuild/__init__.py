@@ -34,6 +34,8 @@ __all__ = [
     # mesh
     "MeshStage", "MeshError", "MeshGates", "read_puml", "write_puml", "msh_to_puml",
     "verify_mesh_against_deck",
+    # deck
+    "DeckStage", "DeckSpec", "DeckError", "resolve_paths",
     # bootstrap
     "init", "Bootstrap",
 ]
@@ -68,4 +70,5 @@ from deckbuild.mesh import (  # noqa: E402
     MeshError, MeshStage, msh_to_puml, read_puml, write_puml,
 )
 from deckbuild.stage_f import verify_mesh_against_deck  # noqa: E402
+from deckbuild.deck import DeckError, DeckSpec, DeckStage, resolve_paths  # noqa: E402
 from deckbuild.bootstrap import Bootstrap, init  # noqa: E402

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+
+import numpy as np
 import time
 from pathlib import Path
 
@@ -36,6 +38,7 @@ from deckbuild.friction import FrictionStage, FwDesign                  # noqa: 
 from deckbuild.material import (                                        # noqa: E402
     AttenuationSpec, MaterialStage, PlasticitySpec,
 )
+from deckbuild.deck import DeckSpec, DeckStage                          # noqa: E402
 from deckbuild.mesh import MeshStage                                    # noqa: E402
 from deckbuild.stage_f import verify_mesh_against_deck                  # noqa: E402
 from deckbuild.stress import KDesign, StressStage                       # noqa: E402
@@ -172,12 +175,35 @@ def main(argv=None) -> int:
     all_ok &= frep2.ok
     man.record("stage_f", report=frep2, wall_s=round(fdt2, 3))
 
+    # -- 7. ASSEMBLE the deck + pre-flight P1-P8 -------------------------------------
+    def _deck():
+        arts = {"material": mat.material, "plasticity": mat.plasticity,
+                "stress": sart, "friction": fart, "mesh": meshart}
+        arts = {k: v for k, v in arts.items() if v is not None}
+        # z = -1 m, never 0: SeisSol v1.1.3 silently DROPS a receiver at the surface.
+        rx = np.array([[cfg.stress_box.xmin + 5000.0 * i,
+                        cfg.stress_box.ymin + 5000.0 * i, -1.0] for i in range(1, 6)])
+        spec = DeckSpec(prefix=f"{cfg.name}_", plasticity=True,
+                        attenuation=mat.attenuation, receivers=rx,
+                        rs_muw_lua=Path(wart.path).read_text(), mu_s=0.6,
+                        notes="")
+        st = DeckStage()
+        dpath = st.assemble(cfg, deck, arts, spec, overwrite=True)
+        rep = st.preflight(cfg, dpath, spec=spec)
+        rep.print()
+        return dpath, rep
+    deck = ROOT / "decks" / f"{cfg.name}_{tag}"
+    (dpath, drep), ddt = stage("[7] DECK      assemble + pre-flight (P1-P8)", _deck)
+    all_ok &= drep.ok
+    man.record("deck", report=drep, wall_s=round(ddt, 3), path=str(dpath))
+
     mpath = man.write(out)
     print("\n" + "=" * 78)
     print(f"manifest     : {mpath}")
     print("artifacts:")
     for e in man.artifacts():
         print(f"  {e['kind']:<12} {Path(e['path']).name:<44} {e['sha256'][:12]}")
+    print(f"deck         : {dpath}")
     print("=" * 78)
     print("WORKFLOW OK" if all_ok else "WORKFLOW: SOME HARD GATES FAILED")
     return 0 if all_ok else 1

@@ -1,125 +1,113 @@
-# Code Review: Phase 5 — mesh ingest, gating, Stage F (2026-08-02)
+# Code Review: Phase 6 — deck assembly and the P1–P8 pre-flight (2026-08-02)
 
-Reviews for Phases 0–4 are in the git history; all 25 of their findings were fixed.
+Reviews for Phases 0–5 are in the git history; all 30 of their findings were fixed.
 
 ## Review Scope
-- Plan: `docs/PLAN_...md`, Phase 5
-- Files: `deckbuild/mesh.py`, `deckbuild/stage_f.py`, `MESHING.md`,
-  `skills/code-mesh-build-improve/SKILL.md`, `tools/make_demo_mesh.py`,
-  `data/demo_planar/demo_planar.puml.h5`, `tests/test_mesh.py`
-- Baseline: 253 tests pass and the full workflow is green on demo_planar.
+- Plan: `docs/PLAN_...md`, Phase 6
+- Files: `deckbuild/deck.py`, `run_workflow.py`, `tests/test_deck.py`
+- Baseline: 282 tests pass; the full workflow is green end to end on `demo_planar`,
+  producing a runnable deck with all eight pre-flight gates passing.
 
 ## Findings
 
-### [R-501] CRITICAL [mesh.py:msh_to_puml] — an interior fault face is tagged on only ONE side
+### [R-601] CRITICAL [deck.py:preflight] — P1's sha256 check could never fire
 
 **Category:** BUG
 
 **Description:**
-`_searchsorted_rows` returned a single index per tagged triangle. A fault triangle is
-**interior**: it is a face of exactly two tets, and BOTH tet-face slots must carry the BC.
-Taking the first match leaves the other side at 0.
+P1 looked the deck's files up in the manifest keyed on `Path(artifact["path"]).name` —
+the **source** filename in `outputs/` (e.g. `friction_depth_profile.nc`). But the deck
+copy is deliberately **renamed** so the filename encodes the design
+(`demo_planar_friction_case1.nc`). The names never match, so `r in by_name` was always
+False and the hash comparison was dead code.
 
-Measured by round-tripping the demo mesh through `.msh` and back:
+The tamper test proved it: corrupting eight bytes of a shipped nc left P1 reporting
+"bad none". The gate advertised integrity checking and delivered none.
 
-```
-BC identical : False   mismatches: 192 of 9216
-```
+**Trigger:** Edit any nc inside an assembled deck and run `preflight`.
 
-192 is exactly the fault-triangle count. Every fault face lost one of its two sides.
-
-Gate C *does* catch the result ("fault face not interior"), which is the gate working —
-but the converter should not produce it, and a user converting a real `.msh` would see a
-confusing C failure on a mesh that is geometrically fine.
-
-**Trigger:** `msh_to_puml` on any mesh with an embedded (interior) fault.
-
-**Suggested fix:** Return the half-open `[lo, hi)` range and tag every match.
+**Suggested fix:** Record the DECK filenames at assemble time.
 ```diff
--    idx = _searchsorted_rows(sorted_faces, key)
-+    lo, hi = _match_rows(sorted_faces, key)
-...
--        flat = order[i]
--        bc[flat % len(tets), flat // len(tets)] = tag_to_bc[int(tri_tags[j])]
-+        for i in range(lo[j], hi[j]):
-+            flat = order[i]
-+            bc[flat % len(tets), flat // len(tets)] = tag_to_bc[int(tri_tags[j])]
++        man.stages["deck_files"] = {
++            e["filename"]: sha256_file(Path(e["dst"])) for e in paths.values()}
+```
+```diff
+-        by_name = {Path(a["path"]).name: a for st in man.get("stages", {}).values()
+-                   for a in st.get("artifacts", [])}
++        by_name = man.get("stages", {}).get("deck_files", {})
 ```
 
-**Test case:** `test_R501_msh_roundtrip_tags_both_sides_of_the_fault` (added).
+**Test case:** `test_P1_flags_a_tampered_file` (now passing; it failed with a traceback
+before, which is how R-602 surfaced).
 
 ---
 
-### [R-502] MODERATE [mesh.py] — `np.core.records` was removed in NumPy 2
+### [R-602] MODERATE [deck.py:preflight] — a corrupt deck produced a traceback, not a report
 
 **Category:** BUG
 
 **Description:**
-`_searchsorted_rows` used `np.core.records.fromarrays`. `np.core` is removed in NumPy 2.x
-(this environment runs 2.3.3); it currently resolves only through a deprecation shim and
-will stop. The replacement is `np.rec.fromarrays`. Fixed as part of R-501.
+With a corrupted nc in the deck, `preflight` crashed with
+`OSError: [Errno -101] NetCDF: HDF error` from a downstream gate before any report was
+returned. The entire point of a pre-flight is to tell you what is wrong *before* you
+queue a job; a traceback with no gate output is the opposite.
+
+**Suggested fix:** Short-circuit after P1 when a referenced file is missing or unreadable.
+```diff
++        if missing or bad_hash:
++            for g in ("P2", "P3", "P4", "P5", "P6", "P7", "P8"):
++                rep.skip(g, "not attempted: P1 found a missing or unreadable referenced "
++                            "file, so the downstream checks cannot be trusted")
++            return rep
+```
 
 ---
 
-### [R-503] MODERATE [tests] — the `.msh` conversion path had no test at all
+### [R-603] MODERATE [deck.py:_collect_refs] — the mesh was reported as an unaccounted extra
+
+**Category:** BUG
+
+**Description:**
+`_collect_refs` scanned only the YAMLs for `file:` targets. The mesh is named by
+`MeshFile` in `parameters.par` (without its `.puml.h5` suffix), so P1 saw the mesh sitting
+in the deck, could not match it to any reference, and reported it as an unexplained extra
+— failing a deck that was in fact correct. A gate that cries wolf on every valid deck gets
+ignored, which then hides the real case it exists for.
+
+**Suggested fix:** Parse `MeshFile` from `parameters.par` and resolve the suffix.
+
+---
+
+### [R-604] MODERATE [deck.py:_check_yield] — P5 skipped whenever the grids differ, i.e. always
 
 **Category:** DEVIATION
 
 **Description:**
-Phase 5's first acceptance criterion is about `msh_to_puml`, and 27 tests covered
-everything *except* it. R-501 lived there undetected. A round-trip test is now added, and
-it is the test that found the bug.
+P5 compared the stress and plasticity fields elementwise and skipped if their shapes
+differed. The four grids are **independent by design** — the shipped SAFS ones are
+material 1500/250, stress 1000/250 — so they essentially always differ and P5 never ran.
 
----
-
-### [R-504] LOW [mesh.py:MeshStage.verify] — gate G is a permanent skip
-
-**Category:** DEVIATION
-
-**Description:**
-Gate G (the pickpoint/partition-boundary screen) always reports skip, because it needs a
-receiver list that only exists once `DeckStage` runs. That is honest, but it means the
-gate is currently decorative. It should move to Phase 6 and run there, with `verify`
-noting that it lives downstream rather than implying it could run here.
+**Suggested fix:** Sample the plasticity onto the stress grid with `trilinear_sample`,
+which is what ASAGI does at run time anyway. P5 now runs and reports
+`0 of 350,811 grid points yield`.
 
 ---
 
 ## Summary
-- Critical: 1 (R-501) | Moderate: 2 (R-502, R-503) | Low: 1 (R-504)
-- Plan compliance: **FULL** for ingest, gating, Stage F, the vendored skill and MESHING.md;
-  gate G is deferred to Phase 6 by design (R-504).
-- Verdict: **PASS WITH FIXES** — R-501 and R-502 fixed in this round.
+- Critical: 1 (R-601) | Moderate: 3 (R-602, R-603, R-604) | Low: 0
+- Plan compliance: **FULL** — assemble (copy-not-symlink, verified by hash), the filename
+  contract, `resolve_paths` as a dry run, preserved hand-written notes, `diff`, and all
+  eight pre-flight gates.
+- Verdict: **PASS WITH FIXES** — all four fixed in this round.
 
 ## Checked and found correct
-- The PUML contract round-trips exactly: dataset names, dtypes (`f8`/`u8`/`i4`), the
-  `boundary = sum_i code_i << (8*i)` packing and both file attributes.
-- Face multiplicity uses a structured lexsort, not a packed int64 key: verified against a
-  node index of 2.2M, which would overflow a 3x21-bit key.
-- Gate C correctly rejects a hull face mislabelled as fault; gate D correctly counts a
-  planted inverted tet; gate E is a skip, never a pass, without a material nc.
-- Stage F refuses to cross-check when the fields came from a different descriptor.
-- The vendored skill differs from the source in exactly the two allowed hunks.
-- Stage F earned its keep immediately: it caught an off-fault hypocentre in the **demo
-  descriptor I had just written** — `lon = -121` projects 180 km east of the demo fault.
-
----
-
-### [R-505] MODERATE [mesh.py:msh_to_puml] — a malformed `.msh` kills the interpreter
-
-**Category:** BUG
-
-**Description:**
-`meshio.read` calls `sys.exit()` on some malformed headers. `SystemExit` derives from
-`BaseException`, so `except Exception` does not catch it: a v4 or truncated `.msh` would
-terminate the caller's process instead of raising the actionable "re-export as msh22"
-message. Found by the v4 test, which failed with `SystemExit: 1`.
-
-Same rule already applied to `geometry._load_puml`: a library must not exit.
-
-**Suggested fix:**
-```diff
--    except Exception as exc:                                  # noqa: BLE001
-+    except (Exception, SystemExit) as exc:
-```
-
-**Test case:** `test_msh_v4_gives_an_actionable_message` (now passing).
+- Copy, never symlink; every copy is sha256-verified against its source.
+- The prefix comes from the descriptor; no filename starts with a hardcoded `safs_`.
+- The YAML `file:` field and the copied filename come from the same variable, and P1
+  re-checks that on disk.
+- Regenerating a deck preserves the hand-written notes block verbatim.
+- Assembly refuses artifacts built from two different descriptors.
+- P6 is a WARN and says so in its own detail: kappa is necessary, not sufficient.
+- P8 catches a `z = 0` receiver, a literal `0.0` in `OutputRegionBounds`, and
+  `wavefieldoutput = 0` — three defects that each cost real runs.
+- `diff` reports exactly one changed file for a one-byte edit.

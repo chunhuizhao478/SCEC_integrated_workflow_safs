@@ -4,10 +4,11 @@ Build every input a SeisSol dynamic-rupture simulation needs, from **raw data**,
 fault system** — then use those freshly built files to determine the physical parameters,
 and write a folder you can run.
 
-> **Status: under construction.** Phases 0–5 of 9 are implemented, and the chain runs end to
+> **Status: under construction.** Phases 0–6 of 9 are implemented, and the chain runs end to
 > end: `python run_workflow.py --project demo_planar` builds material, plasticity, Sv,
-> stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. Deck assembly is Phase 6, the notebook 7,
-> and the SAFS reproduction exercise 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
+> stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. `run_workflow.py` now assembles a runnable deck and
+> runs the P1-P8 pre-flight.  The notebook is Phase 7 and the SAFS reproduction
+> exercise Phase 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
 
 ## The idea
 
