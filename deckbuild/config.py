@@ -109,8 +109,11 @@ class Hypocenter:
     """A REQUESTED nucleation point.
 
     Give EITHER projected coords (x, y, z) OR geographic (lon, lat, depth_m); the loader
-    converts via `Project.crs`.  This point is snapped onto the real fault in Phase 1 --
-    it is not assumed to lie on the triangulation.
+    converts via `Project.crs`.  This point is snapped onto the real fault by
+    geometry.snap_hypocenter -- it is not assumed to lie on the triangulation.
+
+    `depth_m` is referenced to SEA LEVEL (z = -depth_m), NOT to the local ground surface.
+    Under topography the two differ by the local elevation.
     """
 
     x: float | None = None

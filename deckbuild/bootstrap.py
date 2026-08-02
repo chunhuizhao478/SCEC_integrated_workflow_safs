@@ -20,6 +20,13 @@ descriptor).  In order it:
   7. prints a one-screen summary.
 
 Calling init() twice in one kernel is idempotent and still reloads.
+
+CONSEQUENCE OF RELOADING, worth knowing: `importlib.reload` creates NEW class objects.
+Any name bound before the reload -- including exception classes captured in an earlier
+notebook cell -- no longer satisfies `is` or `except` against the new ones.  In a notebook
+that is the accepted price of picking up edits (re-run the cell that imported them).  In a
+test suite it causes cross-test contamination, which is why the reload test runs in a
+subprocess.
 """
 from __future__ import annotations
 

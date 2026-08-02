@@ -238,6 +238,22 @@ def test_manifest_for_project_uses_descriptor_hash():
 
 
 # ------------------------------------------------- review finding R-001
+# NOTE: this runs in a SUBPROCESS on purpose.  _reload_package() replaces every class
+# object in the package, which breaks `is` identity -- and therefore `except` clauses --
+# for any reference another test module already imported.  Running it in-process made five
+# unrelated geometry tests fail.  See bootstrap.py's docstring.
+_RELOAD_PROBE = """
+import sys
+sys.path.insert(0, %r)
+import deckbuild, deckbuild.config, deckbuild.contract
+from deckbuild.bootstrap import _reload_package
+_reload_package()
+assert deckbuild.Project is deckbuild.config.Project, "config re-export is stale"
+assert deckbuild.GateReport is deckbuild.contract.GateReport, "contract re-export is stale"
+print("OK")
+"""
+
+
 def test_R001_reexports_are_refreshed_after_reload():
     """The package must be reloaded AFTER its submodules.
 
@@ -245,13 +261,11 @@ def test_R001_reexports_are_refreshed_after_reload():
     package first re-binds that name to the OLD class object, so `deckbuild.Project` would
     silently be the pre-edit class -- the exact stale-kernel failure init() exists to stop.
     """
-    import deckbuild
-    import deckbuild.config
-    from deckbuild.bootstrap import _reload_package
-
-    _reload_package()
-    assert deckbuild.Project is deckbuild.config.Project
-    assert deckbuild.GateReport is sys.modules["deckbuild.contract"].GateReport
+    import subprocess
+    r = subprocess.run([sys.executable, "-c", _RELOAD_PROBE % str(ROOT)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"reload probe failed:\n{r.stdout}\n{r.stderr}"
+    assert "OK" in r.stdout
 
 
 def test_R001_reload_order_puts_the_package_last():

@@ -1,301 +1,261 @@
-# Code Review: Phase 0 — scaffold, descriptor, stage contract (2026-08-01)
+# Code Review: Phase 1 — geometry and ASAGI I/O (2026-08-01)
+
+Phase 0's review is in the git history (commit `9fd3394`); all seven of its findings were
+fixed before this phase started.
 
 ## Review Scope
-- Plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`, Phase 0
-- Files reviewed: `deckbuild/{__init__,config,contract,bootstrap}.py`,
-  `projects/{safs_alt,safs_preferred,demo_planar}.yaml`,
-  `tests/{test_config,test_contract,test_no_hardcoded_constants}.py`,
-  `.gitignore`, `environment.yml`, `README.md`
-- Domain context: `docs/EXPLORE_deck_components_2026-08-01.md` section 10 (the constant table),
-  and the Phase 0 acceptance criteria.
-- Baseline: 71/71 tests pass. The bugs below are **not** caught by the current suite — that
-  is itself a finding about test coverage.
+- Plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`, Phase 1
+- Files reviewed: `deckbuild/geometry.py`, `deckbuild/asagi.py`, `tests/nc_compare.py`,
+  `tests/test_geometry.py`, `tests/test_asagi.py`, `deckbuild/__init__.py`
+- Domain context: the legacy `generate_stress_nc_from_raw.py` (the source of every ported
+  expression), and the exploration doc's convention and gotcha sections.
+- Baseline: 139/139 tests pass, including three 0-ULP comparisons against the real legacy
+  module. The findings below are not caught by that suite.
 
 ## Findings
 
-### [R-001] CRITICAL [bootstrap.py:_reload_package] — reload order is inverted, so the package re-exports stale objects
+### [R-101] MODERATE [geometry.py:Fault] — comparing two Fault objects raises ValueError
 
 **Category:** BUG
 
 **Description:**
-The sort intends "submodules before the package" (its own comment says so), but
-`reverse=True` combined with the key `(n == "deckbuild", n)` sorts `True` first, putting the
-**package before its submodules**. Verified:
+`Fault` is `@dataclass(frozen=True)` holding numpy arrays. The generated `__eq__` compares
+field tuples, which for arrays yields elementwise arrays and then an ambiguous truth value.
+Verified:
 
 ```
-actual : ['deckbuild', 'deckbuild.contract', 'deckbuild.config', 'deckbuild.bootstrap']
-wanted : submodules first, 'deckbuild' last
+a, b = mk(), mk()          # two distinct, element-wise identical Faults
+bool(a == b)  ->  ValueError: The truth value of an array with more than one element is ambiguous
+hash(a)       ->  TypeError: unhashable type: 'numpy.ndarray'
 ```
 
-`deckbuild/__init__.py` does `from deckbuild.config import Project, ...`. Reloading the
-package first re-binds those names to the **old** module objects; the submodules are then
-reloaded, leaving `deckbuild.Project` pointing at a stale class while
-`deckbuild.config.Project` is fresh. This defeats the single purpose of the function — the
-plan's requirement 6 calls out "a stale Jupyter kernel silently running old code is the
-single most common way to 'fix' something and see nothing change."
+`a == a` happens to work (tuple comparison short-circuits on identity), which is why no
+current test caught it. Any code that compares two independently loaded faults — an obvious
+thing for Phase 5's "fault identity vs the deployed mesh" check, and for Phase 8's
+reproduction diffing — hits this.
 
-**Trigger:** Edit `deckbuild/config.py` in a live kernel, re-run `init()`, then use the
-top-level re-export `deckbuild.Project`.
+**Trigger:** `load_fault(m) == load_fault(m)`.
 
-**Actual behavior:** `deckbuild.Project is not deckbuild.config.Project`; the top-level name
-is the pre-edit class.
+**Actual behavior:** `ValueError`.
 
-**Expected behavior:** After `init()`, every `deckbuild.*` name refers to the reloaded object.
+**Expected behavior:** Either a correct elementwise-aware comparison, or no `__eq__` at all
+(identity), which is the honest choice for a bulk array container.
 
-**Suggested fix:**
+**Suggested fix:** Disable the generated `__eq__`/`__hash__` and provide an explicit,
+named comparison so the intent is unambiguous at the call site.
 ```diff
--    # Reload submodules before the package itself so re-exports pick up new objects.
--    names.sort(key=lambda n: (n == "deckbuild", n), reverse=True)
-+    # Reload submodules BEFORE the package itself, so the package's `from .config import ...`
-+    # re-exports bind to the freshly reloaded objects.  Deepest module first.
-+    names.sort(key=lambda n: (n.count("."), n), reverse=True)
+-@dataclass(frozen=True)
++@dataclass(frozen=True, eq=False)
+ class Fault:
+```
+and add:
+```python
+    def same_geometry_as(self, other: "Fault", tol: float = 0.0) -> bool:
+        """True when both faults have identical facet centroids and normals."""
+        if len(self) != len(other):
+            return False
+        if tol == 0.0:
+            return (np.array_equal(self.cent, other.cent)
+                    and np.array_equal(self.normals, other.normals))
+        return (np.allclose(self.cent, other.cent, rtol=0, atol=tol)
+                and np.allclose(self.normals, other.normals, rtol=0, atol=tol))
 ```
 
 **Test case:**
 ```python
-def test_R001_reexports_are_refreshed_after_reload(tmp_path, monkeypatch):
-    import deckbuild, deckbuild.config
-    from deckbuild.bootstrap import _reload_package
-    _reload_package()
-    assert deckbuild.Project is deckbuild.config.Project, (
-        "top-level re-export is stale: the package was reloaded before its submodules")
+def test_R101_fault_comparison_does_not_raise(planar_mesh):
+    a = load_fault(planar_mesh, strike=SAFS_STRIKE)
+    b = load_fault(planar_mesh, strike=SAFS_STRIKE)
+    assert a is not b
+    assert (a == b) is False          # identity semantics, no exception
+    assert a.same_geometry_as(b)
 ```
 
 ---
 
-### [R-002] MODERATE [.gitignore] — `outputs/.gitkeep` is ignored, so the directory the plan requires is never committed
+### [R-102] MODERATE [asagi.py:roundtrip_selfcheck] — the max-error gate can never fail, deviating from the legacy G3 contract
 
 **Category:** DEVIATION
 
 **Description:**
-Phase 0's "Files to Create" list ends with `outputs/.gitkeep`. The file was created, but
-`.gitignore` line 9 is `outputs/`, which ignores the directory **and everything in it**.
-Verified: `git check-ignore -v outputs/.gitkeep` → `.gitignore:9:outputs/`, and
-`git status --porcelain outputs/.gitkeep` returns nothing.
+The legacy G3 guard is: median within `1e-5` (hard); max is **WARN-only at `5e-4`
+PROVIDED every excursion sits in a grid cell whose corners straddle a kink in the source
+field**. A `>5e-4` excursion in a kink-free cell **is a hard fail** — the exploration doc
+records this explicitly as "a real bug".
 
-A fresh clone therefore has no `outputs/`. `bootstrap.init()` happens to `mkdir` it, but the
-plan asked for the committed placeholder and anything that reads `outputs/` before `init()`
-runs will fail.
+The implementation drops the proviso and marks the max gate `WARN` unconditionally, so the
+hard case is unreachable. A genuine interpolation bug in a smooth region would report as a
+warning and pass.
 
-**Trigger:** `git clone` the repo; `ls outputs`.
+**Trigger:** Any grid whose stored values disagree with the evaluator by more than
+`max_tol` in a smooth region.
 
-**Actual behavior:** No `outputs/` directory exists after clone.
+**Actual behavior:** `[WARN]`, and `report.ok` is True.
 
-**Expected behavior:** `outputs/.gitkeep` is tracked; the directory exists on clone; its
-build products remain ignored.
+**Expected behavior:** hard fail unless the caller can attest the excursion is kink-related.
 
-**Suggested fix:**
+**Suggested fix:** Take an optional predicate; when it is not supplied, the max gate is
+HARD (the safe default), and the caller opts into leniency explicitly.
 ```diff
- # workflow artifacts -- rebuilt, never committed
- outputs/
-+!outputs/.gitkeep
- decks/
+ def roundtrip_selfcheck(path, evaluator, field, n=1000, seed=12345,
+                         median_tol=1e-5, max_tol=5e-4,
+-                        gate="G3", report=None, bbox=None):
++                        gate="G3", report=None, bbox=None,
++                        kink_straddling=None):
 ```
-Then `git add -f outputs/.gitkeep`.
+```diff
+-    rep.add(f"{gate}max", mx <= max_tol,
+-            f"...",
+-            severity=WARN)
++    if mx <= max_tol:
++        rep.add(f"{gate}max", True, f"{field}: max |nc - direct| = {mx:.3e} "
++                f"(tol {max_tol:.0e})")
++    else:
++        bad = np.flatnonzero(err > max_tol)
++        excused = (kink_straddling is not None
++                   and bool(np.all(kink_straddling(pts[bad]))))
++        rep.add(f"{gate}max", excused,
++                f"{field}: max |nc - direct| = {mx:.3e} > tol {max_tol:.0e} at "
++                f"{bad.size} point(s); "
++                + ("all sit in cells straddling a kink in the source field, which is "
++                   "expected for a piecewise-linear field"
++                   if excused else
++                   "no kink_straddling predicate was supplied, so these are treated as "
++                   "real interpolation errors"),
++                severity=WARN if excused else HARD)
+```
 
 **Test case:**
 ```python
-def test_R002_outputs_placeholder_is_tracked():
-    import subprocess
-    from pathlib import Path
-    root = Path(__file__).resolve().parent.parent
-    out = subprocess.run(["git", "check-ignore", "outputs/.gitkeep"],
-                         cwd=root, capture_output=True)
-    assert out.returncode != 0, "outputs/.gitkeep is gitignored; it must be committable"
-    assert (root / "outputs" / ".gitkeep").is_file()
+def test_R102_large_smooth_excursion_is_a_hard_fail(nc):
+    p = nc[0]
+    rep = roundtrip_selfcheck(p, lambda pts: np.zeros(len(pts)), field="f",
+                              n=50, median_tol=1e9, max_tol=1e-6)
+    assert not rep.ok, "a large excursion with no kink excuse must fail HARD"
+
+def test_R102_kink_excuse_downgrades_to_warn(nc):
+    p = nc[0]
+    rep = roundtrip_selfcheck(p, lambda pts: np.zeros(len(pts)), field="f",
+                              n=50, median_tol=1e9, max_tol=1e-6,
+                              kink_straddling=lambda pts: np.ones(len(pts), bool))
+    assert rep.ok
 ```
 
 ---
 
-### [R-003] MODERATE [config.py:Project.validate] — hypocenter XOR check accepts a silently-ignored partial coordinate
+### [R-103] MODERATE [tests/test_asagi.py] — acceptance criterion 5 is not tested against a shipped nc
 
-**Category:** EDGE_CASE
+**Category:** DEVIATION
 
 **Description:**
-The check is `if hypo.is_projected == hypo.is_geographic: raise`. `is_projected` requires all
-of x/y/z; `is_geographic` requires all of lon/lat/depth_m. A descriptor giving a **complete
-projected point plus a stray `lon:`** satisfies `is_projected=True, is_geographic=False`, so
-validation passes and the `lon` is silently discarded.
+Phase 1's fifth acceptance criterion is: *"`trilinear_sample` on the shipped
+`safs_stress_andersonian_k1.7.nc` matches the legacy
+`generate_stress_nc_from_raw.trilinear_sample` to 0 ULP at 1000 fixed-seed points."*
 
-This is precisely the class of error the strict loader exists to prevent: a user editing a
-SAFS descriptor toward their own fault will typically fill in `lon`/`lat` and forget to
-delete `x`/`y`/`z`. They then get a run centred on the **San Andreas** hypocentre with no
-warning. Phase 1's `snap_hypocenter` would not catch it either — the projected point is on
-the SAFS fault, so the snap distance is ~0.
+The suite tests trilinear behaviour only on synthetic grids. I confirmed 0-ULP agreement
+against the legacy function manually on a synthetic compound nc, but the criterion names a
+real shipped file, whose axes are non-trivial (69 z-levels, 250 m spacing, a daylight
+extension) and whose values are float32 at ~1e7 Pa — a regime the synthetic test does not
+cover.
 
-**Trigger:**
-```yaml
-hypocenters:
-  alt: {x: 604446.944, y: 3704576.3853, z: -10067.9819, lon: -121.0}
-```
+**Trigger:** n/a — a missing test.
 
-**Actual behavior:** Loads cleanly; `lon` ignored.
-
-**Expected behavior:** `ConfigError` naming the mixed keys.
-
-**Suggested fix:**
-```diff
--            if hypo.is_projected == hypo.is_geographic:
-+            proj_set = [k for k in ("x", "y", "z") if getattr(hypo, k) is not None]
-+            geo_set = [k for k in ("lon", "lat", "depth_m") if getattr(hypo, k) is not None]
-+            if proj_set and geo_set:
-+                raise ConfigError(
-+                    f"{where}: hypocenters.{mname} mixes projected {proj_set} with "
-+                    f"geographic {geo_set}; give one coordinate system only")
-+            if hypo.is_projected == hypo.is_geographic:
-                 raise ConfigError(
-                     f"{where}: hypocenters.{mname} must give EITHER a complete projected "
-                     f"(x, y, z) OR a complete geographic (lon, lat, depth_m) point, "
-                     f"not both and not neither")
-```
-
-**Test case:**
+**Suggested fix:** Add a skipif-gated test that uses a shipped deck when present.
 ```python
-def test_R003_partial_coordinate_mixing_is_rejected(tmp_path, safs_raw):
-    safs_raw["hypocenters"]["alt"] = {
-        "x": 604446.944, "y": 3704576.3853, "z": -10067.9819, "lon": -121.0}
-    with pytest.raises(ConfigError, match="mixes projected"):
-        Project.load(write_tmp(tmp_path, safs_raw), require_files=False)
+DECK = Path(os.environ.get("DECKBUILD_DECKS", Path.home() / "Downloads/seisol_quakeworx"))
+SHIPPED_STRESS = next(DECK.glob("*/safs_stress_andersonian_k1.7.nc"), None) if DECK.is_dir() else None
+
+@pytest.mark.skipif(SHIPPED_STRESS is None, reason="shipped deck not available")
+def test_R103_trilinear_matches_legacy_on_the_shipped_nc():
+    legacy = _load_legacy()
+    x, y, z = asagi_axes(SHIPPED_STRESS)
+    rng = np.random.default_rng(12345)
+    qx = rng.uniform(x[0], x[-1], 1000)
+    qy = rng.uniform(y[0], y[-1], 1000)
+    qz = rng.uniform(z[0], z[-1], 1000)
+    mine = trilinear_sample(SHIPPED_STRESS, qx, qy, qz)
+    theirs = legacy.trilinear_sample(str(SHIPPED_STRESS), qx, qy, qz)
+    for f in theirs:
+        assert np.array_equal(mine[f], theirs[f]), f
 ```
 
 ---
 
-### [R-004] MODERATE [config.py] — mutable dicts inside frozen dataclasses defeat immutability and break hashing
+### [R-104] LOW [geometry.py:project_point] — documented deviation from the plan's topo-relative depth
+
+**Category:** DEVIATION
+
+**Description:**
+The plan's `Hypocenter.depth_m` comment says "positive down; converted to z with the local
+topo". `project_point` uses `z = -depth_m`, i.e. sea-level referencing, and says so in its
+docstring.
+
+This is the right call — the local topographic elevation lives on the mesh free surface,
+which this function does not receive, and the SAFS descriptors are already sea-level
+referenced. But the deviation is currently only visible to someone reading the function.
+Anyone giving a catalogue depth for a fault under significant topography will be off by the
+local elevation (up to ~3 km for the PREFERRED domain).
+
+**Suggested fix:** Surface it where a user will see it — in the `Hypocenter` docstring in
+`config.py`, and in the snap `GateReport` detail when the geographic path is used.
+```diff
+     depth_m: float | None = None
+```
+```diff
+-    Give EITHER projected coords (x, y, z) OR geographic (lon, lat, depth_m); the loader
+-    converts via `Project.crs`.
++    Give EITHER projected coords (x, y, z) OR geographic (lon, lat, depth_m); the loader
++    converts via `Project.crs`.  `depth_m` is referenced to SEA LEVEL (z = -depth_m), not
++    to the local ground surface -- under topography those differ by the local elevation.
+```
+
+---
+
+### [R-105] LOW [asagi.py:write_asagi] — an undocumented extra check that could reject a legitimate field
 
 **Category:** ASSUMPTION
 
 **Description:**
-`MeshSpec.tag_to_bc`, `SourceSpec.params` and `Project.provenance` are plain `dict` fields on
-`@dataclass(frozen=True)`. `frozen=True` blocks attribute *rebinding* only — the dict
-contents are freely mutable, so `cfg.meshes["alt"].tag_to_bc[999] = 1` silently rewrites the
-shared config. `Project.meshes` / `hypocenters` are likewise mutable dicts.
+`write_asagi` rejects any field containing a non-finite value. The plan does not ask for
+this. It is defensive and almost certainly right (a NaN in an ASAGI grid propagates into
+every element that samples it), but it is an added constraint: a stage that legitimately
+wants a NaN sentinel — for instance a masked region outside a model's coverage — cannot
+write one, and will discover this only at write time.
 
-Separately, `frozen=True` generates `__hash__` from the fields, so `hash(mesh_spec)` raises
-`TypeError: unhashable type: 'dict'`. Nothing hashes these today, but the manifest/provenance
-work in Phase 6 plausibly will (e.g. deduplicating specs in a set).
-
-The descriptor is meant to be the single immutable source of truth for a run; a stage that
-mutates it in place would produce artifacts whose recorded provenance no longer matches what
-was used.
-
-**Trigger:** `cfg.meshes["alt"].tag_to_bc.clear()` then `cfg.validate()` — passes silently on
-a now-empty map, because validation already ran at load.
-
-**Actual behavior:** Mutation succeeds and is invisible.
-
-**Expected behavior:** Mapping fields are read-only.
-
-**Suggested fix:** Freeze the mappings at construction with `MappingProxyType`.
+**Suggested fix:** Keep the check (it is the safer default) but make it opt-out, so the
+constraint is a decision rather than an accident.
 ```diff
-+from types import MappingProxyType
-...
-     if dc is MeshSpec and "tag_to_bc" in kwargs and kwargs["tag_to_bc"] is not None:
-         try:
--            kwargs["tag_to_bc"] = {int(k): int(v) for k, v in kwargs["tag_to_bc"].items()}
-+            kwargs["tag_to_bc"] = MappingProxyType(
-+                {int(k): int(v) for k, v in kwargs["tag_to_bc"].items()})
+ def write_asagi(path, x, y, z, fields, attrs=None, dtype=np.float32):
++                # allow_nonfinite: ASAGI propagates NaN into every element that samples
++                # the grid, so this defaults to False.
 ```
-and wrap `params`, `provenance`, `meshes`, `hypocenters` the same way in `_build_source` /
-`from_dict`. Note `_default_tag_to_bc()` must return a proxy too, and `as_dict` already
-handles `Mapping` via its `dict` branch — confirm it still does (`MappingProxyType` is not a
-`dict` subclass, so `as_dict` needs `isinstance(obj, Mapping)`).
-
-**Test case:**
-```python
-def test_R004_descriptor_mappings_are_read_only():
-    cfg = Project.load(PROJECTS / "safs_alt.yaml", require_files=False)
-    with pytest.raises(TypeError):
-        cfg.meshes["alt"].tag_to_bc[999] = 1
-    with pytest.raises(TypeError):
-        cfg.raw.velocity.params["grid_dx"] = 1.0
-```
-
----
-
-### [R-005] LOW [config.py] — `__import__("re")` inline instead of a module-level import
-
-**Category:** QUALITY
-
-**Description:**
-`_SCI_NO_SIGN = __import__("re").compile(...)` sits in the middle of the module. It works,
-but it hides a dependency from the import block, defeats static analysis, and is the kind of
-thing a reader stops on. Every other import in the package is conventional.
-
-**Trigger:** n/a (readability).
-
-**Suggested fix:**
-```diff
- import hashlib
-+import re
- from dataclasses import dataclass, field, fields, is_dataclass
-...
--_SCI_NO_SIGN = __import__("re").compile(r"^[+-]?\d+(\.\d*)?[eE]\d+$")
-+_SCI_NO_SIGN = re.compile(r"^[+-]?\d+(\.\d*)?[eE]\d+$")
-```
-
----
-
-### [R-006] LOW [config.py:_numeric] — the "did you mean" hint misses unsigned exponents with no integer part
-
-**Category:** EDGE_CASE
-
-**Description:**
-`_SCI_NO_SIGN` is `^[+-]?\d+(\.\d*)?[eE]\d+$`, which requires at least one digit before the
-decimal point. YAML `.5e9` also parses as a string, but takes the generic
-"must be a number" path with no fix suggestion. The error still fires (so this is not a
-correctness bug), but the most useful part of the message is missing for a plausible input.
-
-**Suggested fix:**
-```diff
--_SCI_NO_SIGN = re.compile(r"^[+-]?\d+(\.\d*)?[eE]\d+$")
-+_SCI_NO_SIGN = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)[eE]\d+$")
-```
-
-**Test case:**
-```python
-def test_R006_hint_covers_leading_dot(tmp_path, safs_raw):
-    safs_raw["physics"]["rs_b"] = ".19e-1".replace("-", "")   # '.19e1' -> a YAML string
-    with pytest.raises(ConfigError, match=r"e\+"):
-        Project.load(write_tmp(tmp_path, safs_raw), require_files=False)
-```
-
----
-
-### [R-007] LOW [environment.yml] — pins `pytest=7.*` but the suite was only ever run on pytest 9
-
-**Category:** DEVIATION
-
-**Description:**
-`environment.yml` pins `pytest=7.*`. The 71 passing tests were run under the `pythonenv`
-environment, which has pytest 9.0.2 and Python 3.13 — neither matches this file
-(`python=3.11`). Nobody has executed the suite in the environment this file describes, so
-the pin is an untested claim. Phase 8 depends on `scipy` being pinned for reproducibility,
-so this file needs to be real, not aspirational.
-
-**Suggested fix:** Either relax the pin and record what was tested, or create the env and
-run the suite in it before claiming the pin.
-```diff
--  - pytest=7.*
-+  - pytest>=7,<10          # validated on 9.0.2
-```
-and add to README: "validated on Python 3.13 / pytest 9.0.2 via the `pythonenv` conda env;
-`environment.yml` describes the intended pinned environment and has not yet been built."
+Add `allow_nonfinite: bool = False` and gate the check on it.
 
 ---
 
 ## Summary
-- Critical issues: 1  (R-001)
-- Moderate issues: 3  (R-002, R-003, R-004)
-- Low issues: 3       (R-005, R-006, R-007)
-- Plan compliance: **PARTIAL** — every listed file exists and all five acceptance criteria
-  have tests that pass, but `outputs/.gitkeep` is not actually committable (R-002) and the
-  reload guarantee in requirement 6 does not hold (R-001).
-- Verdict: **PASS WITH FIXES** — R-001 and R-002 must be fixed before Phase 1, since Phase 1
-  onward is developed in live notebooks that depend on the reload behaviour.
+- Critical issues: 0
+- Moderate issues: 3  (R-101, R-102, R-103)
+- Low issues: 2       (R-104, R-105)
+- Plan compliance: **PARTIAL** — every Phase 1 interface exists and four of five acceptance
+  criteria are tested and pass; criterion 5 (0 ULP on the *shipped* nc) is untested
+  (R-103), and the G3 max-error semantics deviate from the legacy contract (R-102).
+- Verdict: **PASS WITH FIXES** — none of these block Phase 2 from starting, but R-102
+  should be fixed before any stage relies on `roundtrip_selfcheck` as a real gate, which
+  Phases 3 and 4 both will.
+
+## Notes on things that were checked and found correct
+- `strike_s_km` is 0 ULP against the legacy `strike_distance_km` over 10,000 random points,
+  and reproduces the two Lua coefficients that appear in every shipped `rs_muw` map.
+- `load_fault` reproduces the legacy centroids, normals, areas, strikes and dips exactly on
+  a synthetic mesh.
+- `trilinear_sample` is 0 ULP against the legacy function on a synthetic compound nc
+  (see R-103 for the shipped-file gap).
+- The `_reload_package` fix from Phase 0 holds, and the test-isolation problem it caused
+  (reload replaces class objects, breaking `except` for other modules' bound references)
+  is fixed by running that probe in a subprocess and is documented in `bootstrap.py`.
 
 ## Unreviewed Areas
-- `docs/` — copied verbatim from the planning session, not re-reviewed here.
-- `skills/SKILL.md` — staged only; Phase 5 vendors it properly with the two required edits.
-- The Colab branch of `bootstrap.init()` (`_colab_setup`, `_find_on_drive`) cannot be
-  exercised on this machine and has no test. Flagged for Phase 7, which is when a Colab run
-  first matters.
+- The Colab branch of `bootstrap.init()` — still unexercisable on this machine.
+- `nc_compare._axes_and_fields` reads non-compound variables into the field set. Correct
+  for comparison, but no shipped file exercises that path yet.

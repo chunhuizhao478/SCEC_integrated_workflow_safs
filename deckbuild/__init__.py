@@ -18,6 +18,12 @@ __all__ = [
     # contract
     "Stage", "Gate", "GateReport", "GateFailure", "Artifact", "Manifest",
     "HARD", "WARN", "SKIP", "sha256_file",
+    # geometry
+    "Fault", "SnappedHypocenter", "GeometryError", "strike_s_km", "load_fault",
+    "fault_trace", "resolve_tractions", "build_grid", "snap_hypocenter",
+    # asagi
+    "AsagiError", "write_asagi", "read_asagi", "trilinear_sample",
+    "hull_containment", "roundtrip_selfcheck",
     # bootstrap
     "init", "Bootstrap",
 ]
@@ -29,5 +35,13 @@ from deckbuild.config import (  # noqa: E402
 from deckbuild.contract import (  # noqa: E402
     Artifact, Gate, GateFailure, GateReport, HARD, Manifest, SKIP, Stage, WARN,
     sha256_file,
+)
+from deckbuild.geometry import (  # noqa: E402
+    Fault, GeometryError, SnappedHypocenter, build_grid, fault_trace, load_fault,
+    resolve_tractions, snap_hypocenter, strike_s_km,
+)
+from deckbuild.asagi import (  # noqa: E402
+    AsagiError, hull_containment, read_asagi, roundtrip_selfcheck, trilinear_sample,
+    write_asagi,
 )
 from deckbuild.bootstrap import Bootstrap, init  # noqa: E402
