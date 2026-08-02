@@ -87,7 +87,9 @@ raw:
       grid_dx: 1500.0
       dz: 200.0
       z_min: -21000.0
+      z_max: 200.0            # the shipped thermal nc tops at +200 (= extend_z_top)
       extend_z_top: 200.0
+      expect_spacing_m: 200.0 # so the missing 15200 m level is WARNed, not silently used
 
 provenance:
   lineage: "safs_seisol_v4_0_0_RSSRW_ALT_THERMAL_CASE1"

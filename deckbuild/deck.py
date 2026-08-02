@@ -126,6 +126,17 @@ class DeckStage:
                 f"config is {cfg.sha256()[:12]}; refusing to assemble")
 
         existing_notes = _read_notes(deck_dir)
+        # Files THIS tool wrote last time, so a regeneration can retire the ones it no
+        # longer produces.  Turning plasticity off left its nc behind, and P1 correctly
+        # reported an unexplained extra -- which is how a stale field gets shipped.
+        stale_prev = {}
+        man_prev = deck_dir / Manifest.FILENAME
+        if man_prev.is_file():
+            try:
+                stale_prev = Manifest.read(man_prev).get("stages", {}).get(
+                    "deck_files", {})
+            except Exception:                                     # noqa: BLE001
+                stale_prev = {}
         if deck_dir.exists() and any(deck_dir.iterdir()) and not overwrite:
             raise DeckError(
                 f"{deck_dir} already exists and is not empty; pass overwrite=True.  The "
@@ -133,6 +144,12 @@ class DeckStage:
         deck_dir.mkdir(parents=True, exist_ok=True)
 
         paths = resolve_paths(deck_dir, artifacts, spec)
+        now = {e["filename"] for e in paths.values()}
+        for old in sorted(set(stale_prev) - now):
+            f = deck_dir / old
+            if f.is_file():
+                f.unlink()
+                print(f"  retired stale deck file: {old}")
         for kind, e in paths.items():
             src, dst = Path(e["src"]), Path(e["dst"])
             shutil.copy2(src, dst)                       # COPY, never symlink
