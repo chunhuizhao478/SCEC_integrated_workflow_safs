@@ -1,0 +1,25 @@
+# deckbuild -- the SeisSol deck-build workflow.
+# conda env create -f environment.yml && conda activate deckbuild
+name: deckbuild
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  # --- core numerics (pinned: scipy's Delaunay affects the CVM rebuild, see Phase 8) ---
+  - numpy=1.26.*
+  - scipy=1.11.*
+  # --- I/O ---
+  - netcdf4=1.6.*
+  - h5py=3.10.*
+  - pyyaml=6.*
+  - meshio=5.3.*
+  # --- projection ---
+  - pyproj=3.6.*
+  # --- figures / notebooks ---
+  - matplotlib=3.8.*
+  - jupyterlab
+  - nbconvert
+  # --- tests ---
+  - pytest>=7,<10          # validated on 9.0.2
+  # --- mesh generation (OPTIONAL: only the code-mesh-build-improve skill needs it) ---
+  # - gmsh

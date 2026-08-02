@@ -1,0 +1,95 @@
+# SAFS ALT -- the San Andreas fault system, "alternative" fault geometry.
+#
+# Every value here was a hardcoded constant in the legacy toolbox.  The trailing comment on
+# each line names the legacy symbol it replaces; see docs/EXPLORE_deck_components section 10.
+# Nothing in deckbuild/ may contain these numbers as literals.
+
+name: safs_alt
+
+crs:
+  epsg: "EPSG:32611"              # was: hardcoded in bbp_export, build_friction_nc_thermal,
+                                  #      build_plasticity_roten2014 and both raw generators
+  geographic_epsg: "EPSG:4326"
+
+strike:
+  azimuth_deg: 314.0              # was: _common.STRIKE_HINT_AZ / pipeline.STRIKE_AZ (N46W)
+  origin_xy: [606971.0, 3707270.0]   # was: pipeline.GATE_ORIGIN_XY
+
+# The stress-build grid.  was: _common.ALT_BOX, extended in z to cover both faults' bottoms.
+stress_box:
+  xmin: 350000.0
+  xmax: 630000.0
+  ymin: 3680000.0
+  ymax: 3850000.0
+  zmin: -17000.0
+  zmax: 0.0                       # ALT does not daylight, so no z > 0 extension
+  dx: 1000.0
+  dz: 250.0
+
+meshes:
+  alt:
+    path: mesh_alt.puml.h5        # was: _common.ALT_MESH
+    fault_bc: 3                   # SeisSol dynamic-rupture BC
+    tag_to_bc: {101: 3, 102: 1, 103: 5, 104: 5}   # was: msh_to_puml tag map
+    daylights: false              # was: _common.daylight_for("*_alt") -> (False, 0.0)
+    daylight_min_depth_m: 0.0
+
+default_mesh: alt
+
+# Named restraining bends along strike.  was: _common.GATE_BANDS.
+# Only San Gorgonio lies within the ALT mesh's s-range; NW Big Bend is PREFERRED-only.
+gate_bands:
+  - {s_start_km: 28.0, s_end_km: 72.0, name: San Gorgonio}
+
+hypocenters:
+  alt:
+    x: 604446.944                 # the v4_0_0 ALT CASE1 nucleation centre, already ON-fault
+    y: 3704576.3853
+    z: -10067.9819
+    snap_tol_m: 2000.0
+    label: "v4_0_0 ALT CASE1 10 km hypocentre"
+
+physics:
+  mu_shear_pa: 23.5e+9             # was: _common.MU_SHEAR
+  w_energy_m: 10.0e+3              # was: _common.W_ENERGY
+  dc_m: 1.2                       # was: _common.DC
+  kappa_c: 0.9                    # was: _common.KAPPA_C
+  seis_band_km: [3.0, 12.0]       # was: _common.SEIS_BAND_KM
+  active_band_km: [0.3, 15.0]     # was: _common.ACTIVE_BAND_KM
+  l_coast_km: 6.0                 # was: _common.L_COAST_KM
+  gap_max_km: 4.0                 # was: _common.GAP_MAX_KM
+  sn_floor_mpa: 30.0              # was: _common.SN_FLOOR_MPA
+  rs_b: 0.019                     # SeisSol v1.1.3 FL=103 never reads rs_b spatially
+  rs_sl0: 0.10
+
+raw:
+  orientation:
+    kind: csm_csv                 # CSM YHSM-2013 (Yang & Hauksson)
+    path: raw/CSM_orientation.csv
+    params:
+      shmax_col: 10               # author SHmax azimuth -- NOT an eigendecomposition
+      shape_ratio_col: 13         # R
+  velocity:
+    kind: cvm_slices              # statewide "muscal" CVM horizontal slices
+    path: raw/cvm/CVM_*_h_data.csv
+    params:
+      columns: [lon, lat, vp, vs, density]
+      grid_dx: 1500.0
+      dz: 250.0
+      z_min: -45000.0
+      z_max: 100.0
+      extend_z_top: 100.0
+  thermal:
+    kind: ctm_slices              # SCEC Community Thermal Model (shinevar2024)
+    path: raw/ctm/CTM_*_h_data_final.csv
+    params:
+      columns: [Lon, Lat, Temperature]
+      grid_dx: 1500.0
+      dz: 200.0
+      z_min: -21000.0
+      extend_z_top: 200.0
+
+provenance:
+  lineage: "safs_seisol_v4_0_0_RSSRW_ALT_THERMAL_CASE1"
+  transcribed_from: "combined_workflow/lib/_common.py + pipeline.py"
+  transcribed_on: "2026-08-01"

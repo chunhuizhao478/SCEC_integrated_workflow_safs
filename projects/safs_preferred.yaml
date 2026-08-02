@@ -1,0 +1,97 @@
+# SAFS PREFERRED -- the San Andreas fault system, "preferred" fault geometry.
+#
+# Differs from safs_alt in exactly four things: the grid box (larger, and extended to
+# z = +3000 because this fault DAYLIGHTS under +3 km topography), the mesh, the second
+# named gate band (NW Big Bend), and the hypocentre.  Everything else is identical --
+# the stress recipe and physics constants are shared.
+
+name: safs_preferred
+
+crs:
+  epsg: "EPSG:32611"
+  geographic_epsg: "EPSG:4326"
+
+strike:
+  azimuth_deg: 314.0              # was: _common.STRIKE_HINT_AZ / pipeline.STRIKE_AZ
+  origin_xy: [606971.0, 3707270.0]   # was: pipeline.GATE_ORIGIN_XY
+
+# was: _common.PREF_BOX.  zmax = +3000 so the daylighting fault facets carry tau_0 > 0;
+# without it 7146 facets had sigma_n = 0 -> psi_ini = -inf -> "Inf/NaN in energies" abort.
+stress_box:
+  xmin: 195000.0
+  xmax: 628000.0
+  ymin: 3685000.0
+  ymax: 3965000.0
+  zmin: -20000.0
+  zmax: 3000.0
+  dx: 1000.0
+  dz: 250.0
+
+meshes:
+  preferred:
+    path: mesh_preferred_rvfix4.puml.h5   # was: _common.PREF_MESH (the production deck mesh)
+    fault_bc: 3
+    tag_to_bc: {101: 3, 102: 1, 103: 5, 104: 5}
+    daylights: true               # was: _common.daylight_for("*_pref") -> (True, ...)
+    daylight_min_depth_m: 100.0   # RSSRW needs min_depth > 0 so the trace carries tau_0 > 0
+                                  # (rate-and-state state init is -inf at tau_0 = 0).
+                                  # An LSW build uses 0.0 here.
+
+default_mesh: preferred
+
+gate_bands:
+  - {s_start_km: 28.0,  s_end_km: 72.0,  name: San Gorgonio}
+  - {s_start_km: 334.0, s_end_km: 380.0, name: NW Big Bend}   # PREFERRED-only
+
+hypocenters:
+  preferred:
+    x: 609062.9                   # the v3_4_1 PREFERRED hypocentre
+    y: 3709528.1
+    z: -10000.0
+    snap_tol_m: 2000.0
+    label: "v3_4_1 PREFERRED 10 km hypocentre"
+
+physics:
+  mu_shear_pa: 23.5e+9
+  w_energy_m: 10.0e+3
+  dc_m: 1.2
+  kappa_c: 0.9
+  seis_band_km: [3.0, 12.0]
+  active_band_km: [0.3, 15.0]
+  l_coast_km: 6.0
+  gap_max_km: 4.0
+  sn_floor_mpa: 30.0
+  rs_b: 0.019
+  rs_sl0: 0.10
+
+raw:
+  orientation:
+    kind: csm_csv
+    path: raw/CSM_orientation.csv
+    params:
+      shmax_col: 10
+      shape_ratio_col: 13
+  velocity:
+    kind: cvm_slices
+    path: raw/cvm/CVM_*_h_data.csv
+    params:
+      columns: [lon, lat, vp, vs, density]
+      grid_dx: 1500.0
+      dz: 250.0
+      z_min: -45000.0
+      z_max: 100.0
+      extend_z_top: 100.0
+  thermal:
+    kind: ctm_slices
+    path: raw/ctm/CTM_*_h_data_final.csv
+    params:
+      columns: [Lon, Lat, Temperature]
+      grid_dx: 1500.0
+      dz: 200.0
+      z_min: -21000.0
+      extend_z_top: 200.0
+
+provenance:
+  lineage: "safs_seisol_v4_0_0_RSSRW_PREFERRED_THERMAL"
+  transcribed_from: "combined_workflow/lib/_common.py + pipeline.py"
+  transcribed_on: "2026-08-01"

@@ -1,0 +1,23 @@
+# build / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# workflow artifacts -- rebuilt, never committed
+# NOTE: exclude the CONTENTS, not the directory.  git never descends into an excluded
+# directory, so `outputs/` + `!outputs/.gitkeep` would NOT work.
+outputs/*
+!outputs/.gitkeep
+decks/
+data/*/raw/
+data/*/cache/
+
+# large inputs: the demo mesh IS committed (see data/demo/), nothing else
+data/**/*.nc
+data/**/*.puml.h5
+!data/demo/*.puml.h5
+
+# OS
+.DS_Store
