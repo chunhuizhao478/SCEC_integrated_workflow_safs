@@ -27,6 +27,10 @@ __all__ = [
     # stress
     "StressStage", "KDesign", "StressError",
     "OrientationField", "read_orientation", "OrientationError",
+    # friction / material
+    "FrictionStage", "FwDesign", "FrictionError",
+    "MaterialStage", "MaterialArtifacts", "PlasticitySpec", "AttenuationSpec",
+    "MaterialError",
     # bootstrap
     "init", "Bootstrap",
 ]
@@ -51,4 +55,10 @@ from deckbuild.orientation import (  # noqa: E402
     OrientationError, OrientationField, read_orientation,
 )
 from deckbuild.stress import KDesign, StressError, StressStage  # noqa: E402
+from deckbuild.friction import (  # noqa: E402
+    FrictionError, FrictionStage, FwDesign,
+)
+from deckbuild.material import (  # noqa: E402
+    AttenuationSpec, MaterialArtifacts, MaterialError, MaterialStage, PlasticitySpec,
+)
 from deckbuild.bootstrap import Bootstrap, init  # noqa: E402

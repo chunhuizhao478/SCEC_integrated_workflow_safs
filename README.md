@@ -4,10 +4,10 @@ Build every input a SeisSol dynamic-rupture simulation needs, from **raw data**,
 fault system** — then use those freshly built files to determine the physical parameters,
 and write a folder you can run.
 
-> **Status: under construction.** Phases 0–2 of 9 are implemented: the package scaffold and
-> project descriptor, the shared geometry/ASAGI layers, and the stress stage. Friction,
-> material and mesh land in Phases 3–5, deck assembly in 6, the notebook in 7, and the SAFS
-> reproduction exercise in 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
+> **Status: under construction.** Phases 0–4 of 9 are implemented, and the chain runs end to
+> end: `python run_workflow.py --project demo_planar` builds material, plasticity, Sv,
+> stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. Mesh ingest
+> is Phase 5, deck assembly 6, the notebook 7, and the SAFS reproduction exercise 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
 
 ## The idea
 
@@ -17,9 +17,9 @@ so it is handed to a **skill document** you give to Claude.
 
 | Ingredient | Built from | Owner |
 |:--|:--|:--|
-| material (+ plasticity, + Q) | raw CVM velocity slices | `deckbuild/material.py` *(Phase 4)* |
+| material (+ plasticity, + Q) | raw CVM velocity slices | `deckbuild/material.py` **(done)** |
 | stress | raw stress-orientation data + Sv from the material | `deckbuild/stress.py` **(done)** |
-| friction | raw temperature slices, or a depth profile | `deckbuild/friction.py` *(Phase 3)* |
+| friction | raw temperature slices, or a depth profile | `deckbuild/friction.py` **(done)** |
 | **mesh** | your fault geometry | **`skills/code-mesh-build-improve`** *(Phase 5)* |
 
 Everything fault-specific — map projection, strike direction, grid boxes, named restraining
@@ -51,6 +51,7 @@ data/<project>/     raw inputs and caches (gitignored, except the demo mesh)
 conda env create -f environment.yml
 conda activate deckbuild
 pytest -q
+python run_workflow.py --project demo_planar    # the chain, end to end
 ```
 
 > **Validated on:** Python 3.13 / pytest 9.0.2 / PyYAML 6.0.3, via an existing conda env.

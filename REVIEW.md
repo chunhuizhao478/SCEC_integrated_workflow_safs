@@ -1,216 +1,176 @@
-# Code Review: Phase 2 — the stress stage (2026-08-01)
+# Code Review: Phases 3 + 4 — friction and material (2026-08-01)
 
-Phases 0 and 1 reviews are in the git history (`9fd3394`, `3866c65`); all twelve of their
-findings were fixed.
+Reviews for Phases 0–2 are in the git history (`9fd3394`, `3866c65`, `7e09f26`); all
+seventeen of their findings were fixed.
 
 ## Review Scope
-- Plan: `docs/PLAN_...md`, Phase 2
-- Files: `deckbuild/stress.py`, `deckbuild/orientation.py`, `tests/test_stress.py`
-- Baseline: 182/182 tests pass.
+- Plan: `docs/PLAN_...md`, Phases 3 and 4
+- Files: `deckbuild/friction.py`, `deckbuild/material.py`, `run_workflow.py`,
+  `tests/test_friction_material.py`
+- Baseline: 219 tests pass and `run_workflow.py --project demo_planar` completes with
+  13 hard gates passing. The findings below are not caught by either.
 
 ## Findings
 
-### [R-201] MODERATE [stress.py:_apply_daylight_patch] — the daylight patch is a constant slab, not the per-column topographic overburden
-
-**Category:** DEVIATION
-
-**Description:**
-The legacy `step6_write_nc._apply_daylight_patch` takes a `daylight_mesh` and reads the
-BC-1 free surface to get `z_topo(x, y)`, then fills each column's `z >= 0` levels with that
-column's own overburden. This implementation fills every `z >= 0` level with a **single
-constant slab** evaluated at one depth.
-
-For the SAFS PREFERRED fault — which daylights to +2209 m under +3 km of topography — those
-are not the same field. The shipped `safs_stress_andersonian_*.nc` for PREFERRED was built
-the legacy way, so Phase 8's E4 rung **cannot** reproduce it data-identically with this
-implementation.
-
-It is correct for a flat-top domain (ALT), which is why every current test passes.
-
-**Trigger:** Build a PREFERRED-style project with `daylight_patch=True` and compare against
-a shipped PREFERRED stress nc.
-
-**Actual behavior:** One constant slab above `z = 0`.
-
-**Expected behavior:** Per-column fill at the local topographic depth.
-
-**Suggested fix:** Take the mesh, extract the free surface, and evaluate per column.
-```diff
--def _apply_daylight_patch(comps, gz, depth_grid, sv_grid, az_col, R_col, k_col,
--                          nx, ny, min_depth_m):
-+def _apply_daylight_patch(comps, gz, depth_grid, sv_grid, az_col, R_col, k_col,
-+                          nx, ny, min_depth_m, colx=None, coly=None, topo=None):
-```
-where `topo(colx, coly) -> z_topo` comes from the mesh's BC-1 faces, and the per-column
-depth is `max(min_depth_m, z_topo - z_level)`. Until that lands, the limitation must be
-stated in the module docstring and the build must **refuse** `daylight_patch=True` when no
-topography source is supplied, rather than silently writing the flat-top approximation.
-
-**Test case:**
-```python
-def test_R201_daylight_patch_requires_a_topography_source(demo, sv, tmp_path):
-    with pytest.raises(StressError, match="topograph"):
-        StressStage().build(demo, tmp_path, sv_profile=sv, k=1.7,
-                            daylight_patch=True)
-```
-
----
-
-### [R-202] MODERATE [stress.py:StressStage.verify] — a corrupt mesh is reported as a skipped gate
+### [R-301] CRITICAL [material.py:sv_profile_from_material] — the Sv profile's depth axis is grid-top referenced, but every consumer reads it as sea-level depth
 
 **Category:** BUG
 
 **Description:**
-```python
-try:
-    fault = load_fault(...)
-except Exception as exc:
-    rep.skip("V4", f"fault mesh unavailable ({type(exc).__name__})")
+`sv_profile_from_material` builds `depth = ztop[0] - ztop`, i.e. depth **measured from the
+top of the material grid**. `StressStage._assemble` then asks for `sv_eff_at(depth=-z)` —
+depth **from sea level**. The two agree only when the material grid's `z_max` is exactly 0.
+
+It is not. The whole point of `extend_z_top` is to push the material grid above sea level
+so it covers topography; the shipped SAFS CVM tops out at **+3250 m**. For any such grid
+the stress field is built from an Sv profile shifted by `z_max`.
+
+Measured on a demo grid with `z_max = 500`:
+
 ```
-The bare `except Exception` cannot tell "no mesh file here" from "the mesh is corrupt", "the
-BC map is wrong", or "there are no BC-3 faces". All four become a skip, and `report.ok`
-stays True. The contract everywhere else in this package is that a skip is for a genuinely
-absent optional input — a broken input must fail.
+stress asks Sv at depth=    0.0 m  ->    0.000 MPa   (should be ~ 0)
+stress asks Sv at depth=10000.0 m  ->  151.656 MPa   (should be ~157.6)
+```
 
-**Trigger:** `verify()` against a project whose mesh exists but has the wrong `fault_bc`.
+That is ~4 % low at 10 km and proportionally much worse near the surface — where the
+shallow-freeze band lives and where `sigma_n` decides whether the trace runs away. The
+whole stress field is wrong, silently, with every gate passing: V2 only checks the
+eigenvalue *ratio* `k`, which is invariant under an overall scale of `Sv`.
 
-**Actual behavior:** `[ -- ] V4: fault mesh unavailable (GeometryError)`, `ok == True`.
+**Trigger:** Any project whose velocity grid has `z_max != 0` — which is every real one.
 
-**Expected behavior:** absent mesh -> skip; present-but-unusable mesh -> HARD fail.
+**Actual behavior:** `Sv(depth)` is offset by `z_max`.
 
-**Suggested fix:**
+**Expected behavior:** The profile is sea-level referenced (`z = 0` -> `depth = 0`), or it
+declares its reference and the consumer honours it.
+
+**Suggested fix:** Reference to sea level explicitly, and record it in the npz so a
+consumer cannot guess wrong.
 ```diff
--        try:
--            fault = load_fault(cfg.mesh(), cfg.data_dir, strike=cfg.strike)
--        except Exception as exc:
--            rep.skip("V4", f"fault mesh unavailable ({type(exc).__name__}); "
--                           f"the on-fault screen did not run")
--            return rep
-+        mesh_path = cfg.resolve_path(cfg.mesh(mesh_name).path)
-+        if not Path(mesh_path).is_file():
-+            rep.skip("V4", f"no mesh at {mesh_path}; the on-fault screen did not run")
-+            return rep
-+        try:
-+            fault = load_fault(cfg.mesh(mesh_name), cfg.data_dir, strike=cfg.strike)
-+        except Exception as exc:                     # present but unusable -> FAIL
-+            rep.add("V4", False,
-+                    f"mesh {mesh_path} exists but could not be read: "
-+                    f"{type(exc).__name__}: {exc}")
-+            return rep
+-    depth = ztop[0] - ztop                                      # 0 at the grid top
++    # SEA-LEVEL referenced: depth = -z, so depth 0 is z = 0, matching what the stress
++    # closure asks for.  Referencing to the grid top would offset the whole field by
++    # z_max, which is +3250 m for the shipped SAFS CVM.
++    depth = -ztop
 ```
+and clamp the integration to start at the shallowest node while keeping the mapping, plus:
+```diff
+-    np.savez(spath, depth_m=depth, sv_eff_mpa=sv_eff)
++    np.savez(spath, depth_m=depth, sv_eff_mpa=sv_eff, reference="sea_level")
+```
+with `_sv_arrays` asserting `reference == "sea_level"` when present.
 
 **Test case:**
 ```python
-def test_R202_corrupt_mesh_fails_v4_rather_than_skipping(demo, sv, tmp_path):
-    bad = tmp_path / "data" / "demo_planar.puml.h5"
-    bad.parent.mkdir(parents=True, exist_ok=True)
-    bad.write_bytes(b"not an hdf5 file")
-    art = StressStage().build(demo, tmp_path, sv_profile=sv, k=1.7,
-                              freeze_above_depth_m=0.0)
-    rep = StressStage().verify(demo, art)
-    v4 = [g for g in rep.gates if g.name == "V4"][0]
-    assert v4.severity == "hard" and not v4.passed
+def test_R301_sv_profile_is_sea_level_referenced(tmp_path):
+    """depth 0 must mean z = 0, whatever the material grid's z_max is."""
+    raw = yaml.safe_load((PROJECTS / "demo_planar.yaml").read_text())
+    raw["raw"]["velocity"]["params"]["z_max"] = 500.0
+    p = tmp_path / "t.yaml"; p.write_text(yaml.safe_dump(raw))
+    cfg = Project.load(p, require_files=False, data_dir=tmp_path)
+    out = MaterialStage().build(cfg, tmp_path)
+    d = np.load(out.sv_profile.path)
+    i = int(np.argmin(np.abs(d["depth_m"] - 0.0)))
+    assert d["sv_eff_mpa"][i] == pytest.approx(0.0, abs=1e-9)
+    j = int(np.argmin(np.abs(d["depth_m"] - 10000.0)))
+    assert d["sv_eff_mpa"][j] == pytest.approx(157.6, rel=0.02)
 ```
 
 ---
 
-### [R-203] MODERATE [tests/test_stress.py] — the demo's parameters make `s_xx` blind to k, so a broken grading would pass
+### [R-302] MODERATE [friction.py:build] — the depth-profile path silently borrows the STRESS grid
+
+**Category:** ASSUMPTION
+
+**Description:**
+```python
+gx, gy, gz = build_grid(cfg.stress_box)
+```
+The friction nc is written on `cfg.stress_box`. The four grids are deliberately
+independent — the exploration doc measures the shipped ones at
+`material 1500/250`, `stress 1000/250`, `friction 1500/200` — and the descriptor has no
+friction grid, so this path picks the stress one by default without saying so.
+
+It is not wrong today (any ASAGI grid that contains the fault works), but it means a user
+who tunes the stress grid silently re-grids their friction field, and it makes the friction
+nc's resolution un-settable. Phase 8 needs `dz = 200` for friction and `250` for stress,
+which this cannot express.
+
+**Suggested fix:** Read the grid from the thermal source's params, falling back to the
+stress box with a printed note.
+```diff
+-            gx, gy, gz = build_grid(cfg.stress_box)
++            box = cfg.stress_box
++            gdx = float(p.get("grid_dx", box.dx)); gdz = float(p.get("dz", box.dz))
++            zlo = float(p.get("z_min", box.zmin)); zhi = float(p.get("z_max", box.zmax))
++            gx = np.arange(box.xmin, box.xmax + 0.5 * gdx, gdx)
++            gy = np.arange(box.ymin, box.ymax + 0.5 * gdx, gdx)
++            gz = np.arange(zlo, zhi + 0.5 * gdz, gdz)
+```
+
+**Test case:**
+```python
+def test_R302_friction_grid_is_settable(demo_with_friction_dz_200, tmp_path):
+    art = FrictionStage().build(cfg, tmp_path)
+    _, _, z, _, _ = read_asagi(art.path)
+    assert np.diff(z)[0] == pytest.approx(200.0)
+```
+
+---
+
+### [R-303] LOW [friction.py:_eval_lua_text] — the FL gate's regex can silently find no transitions
 
 **Category:** EDGE_CASE
 
 **Description:**
-The demo project has `R = 0.5` and SHmax `az = 45`. For that combination the xx component
-is **algebraically independent of k**:
+`_eval_lua_text` re-parses the emitted Lua with a multi-line regex. If the emitter's
+formatting changes, the regex matches nothing and the function returns the base value.
+For a graded design that makes FL **fail** (fail-safe, which is right), but for a UNIFORM
+design it would pass while proving nothing.
 
-```
-sigma_xx = sig1 sin^2(45) + sig3 cos^2(45) = 0.5 (sig1 + sig3) = 0.5 sig3 (1 + k)
-sig3     = Sv / ((1-R)k + R) = 2 Sv / (k + 1)      when R = 0.5
-=> sigma_xx = Sv      for every k
-```
-
-Measured: a graded build with `k = 1.2 -> 2.4` gives `s_xx = -166.77 MPa` at every column.
-So a test that probes `s_xx` for lateral variation proves nothing, and a regression that
-silently dropped the grading entirely would still pass the current suite. The eigenvalue
-test (`test_built_field_reproduces_the_closure_ratio`) does constrain k, but only for the
-uniform case.
-
-`s_xy` is not degenerate: `sigma_xy = Sv (k - 1) / (k + 1)`, which I verified matches the
-build to 3 decimal places at both plateaus.
-
-**Suggested fix:** Add an analytic grading test on `s_xy`.
-
-**Test case:**
-```python
-def test_R203_graded_k_varies_the_field_analytically(demo, sv, tmp_path):
-    """R=0.5, az=45 makes s_xx k-INVARIANT; s_xy is the component that moves."""
-    d = KDesign(k_values=(1.2, 2.4), boundaries_s_km=((20.0, 30.0),))
-    art = StressStage().build(demo, tmp_path, sv_profile=sv, design=d,
-                              freeze_above_depth_m=0.0)
-    _, _, z, f, _ = read_asagi(art.path)
-    kz = int(np.argmin(np.abs(z - (-10000.0))))
-    row = f["s_xy"][kz].mean(axis=1) / 1e6
-    Sv = 1700.0 * 9.81 * 10000.0 / 1e6
-    assert row[0] == pytest.approx(-Sv * (1.2 - 1) / (1.2 + 1), abs=0.05)
-    assert row[-1] == pytest.approx(-Sv * (2.4 - 1) / (2.4 + 1), abs=0.05)
-```
-
----
-
-### [R-204] LOW [stress.py:_project_onto_fault] — an obfuscated dynamic import
-
-**Category:** QUALITY
-
-**Description:**
-```python
-_, _, zg = (np.asarray(a) for a in __import__(
-    "deckbuild.asagi", fromlist=["asagi_axes"]).asagi_axes(nc_path))
-```
-`asagi_axes` is already imported at the top of the function's module neighbours; this
-construct hides the dependency and is hard to read for no benefit.
-
-**Suggested fix:**
+**Suggested fix:** Assert the parse found exactly the expected number of transitions.
 ```diff
--    from deckbuild.asagi import trilinear_sample
-+    from deckbuild.asagi import asagi_axes, trilinear_sample
-     from deckbuild.geometry import resolve_tractions
--    _, _, zg = (np.asarray(a) for a in __import__(
--        "deckbuild.asagi", fromlist=["asagi_axes"]).asagi_axes(nc_path))
-+    _, _, zg = asagi_axes(nc_path)
++    found = pat.findall(text)
++    n_want = text.count("-- transition ")
++    if len(found) != n_want:
++        raise FrictionError(
++            f"FL: parsed {len(found)} transition(s) from the emitted Lua but the text "
++            f"declares {n_want}; the emitter and this parser have drifted")
+-    for lo, hi, _lo2, hv, av in pat.findall(text):
++    for lo, hi, _lo2, hv, av in found:
 ```
 
 ---
 
-### [R-205] LOW [stress.py:StressStage.verify] — V1 is always reported as skipped
+### [R-304] LOW [material.py] — `M4` is always skipped, so the round-trip guard never runs
 
-**Category:** QUALITY
+**Category:** DEVIATION
 
 **Description:**
-`verify()` unconditionally emits `rep.skip("V1", ...)`. The real V1 lives in
-`verify_regions()`, which the tests exercise. That is a defensible split (V1 needs the Sv
-profile and a scratch directory, which `verify` does not take), but a reader of a
-`GateReport` sees `V1 skipped` with no indication that a real V1 ran elsewhere.
+The plan's `M4` is the fixed-seed round-trip self-check, the material's equivalent of `G3`.
+`verify` unconditionally skips it. The machinery exists (`asagi.roundtrip_selfcheck`) and
+the `layered_1d` reader has a trivially available evaluator (the 1-D interpolant), so this
+one could actually run for the implemented path.
 
-**Suggested fix:** Make the skip detail point at the method that does run it, and have
-`verify_regions` return a report that can be merged, so a caller can present one battery.
-The detail already names `verify_regions`; add a note that the merged form is the complete
-V1–V4 and reference it from the stage docstring.
+**Suggested fix:** Run it when the source is `layered_1d`, skip only for readers with no
+cheap evaluator.
 
 ---
 
 ## Summary
-- Critical: 0 | Moderate: 3 (R-201, R-202, R-203) | Low: 2 (R-204, R-205)
-- Plan compliance: **PARTIAL** — the closure, grading, freeze and V1–V4 names are all in
-  place and correct, but the daylight patch is a flat-top approximation of the legacy
-  per-column treatment (R-201), which blocks PREFERRED reproduction in Phase 8.
-- Verdict: **PASS WITH FIXES** — R-201 and R-202 must be fixed before Phase 8; R-203 before
-  anyone trusts the grading tests.
+- Critical: 1 (R-301) | Moderate: 1 (R-302) | Low: 2 (R-303, R-304)
+- Plan compliance: **PARTIAL** — the friction profiles, graded f_w, Lua emission, plasticity
+  and Sv derivation are all in place and gated; the `cvm_slices` and `ctm_slices` raw
+  readers raise "not implemented" rather than being silently wrong, which is the right
+  interim state but leaves Phase 8's E3 rung blocked.
+- Verdict: **FAIL — must fix before proceeding.** R-301 makes every stress field built
+  through the real pipeline quantitatively wrong, and no existing gate detects it.
 
 ## Checked and found correct
-- `magnitudes_C1` and `build_tensor_andersonian` are verbatim ports; the built tensor's
-  horizontal eigenvalue ratio equals k to 2e-3 (float32 storage), sigma2 is exactly
-  vertical, and the eigenvalues are exactly (sig3, sig2, sig1).
-- Array orientation: fields are written `(nz, ny, nx)` and a graded design varies along the
-  correct axis, verified against the closed form `sigma_xy = Sv (k-1)/(k+1)`.
-- The freeze touches only the shallow band: below the freeze depth a frozen and an unfrozen
-  build are bit-identical, and `mu_app` is preserved inside the band.
-- SHmax is interpolated as a doubled-angle unit vector, so the 179/1 wrap gives 0, not 90.
+- The a-b and V_w profiles match the legacy hand values at all nine kink temperatures for
+  both cases; the self-test runs before any baking.
+- `bulkFriction` is `tan(phi)`, not degrees; cohesion is linear in mu (verified by a
+  midpoint test), which is what keeps ASAGI-interpolated cohesion consistent with mu.
+- The emitted Lua reproduces its design to 0 over s in [-50, 500] km, and carries the
+  descriptor's strike frame — now in `%.17g`, matching the shipped maps' formatting.
+- `check_seissol_supports_spatial_muw` correctly rejects 1.1.3 and 1.3.2, accepts 1.4.0.
