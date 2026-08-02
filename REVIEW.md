@@ -1,113 +1,89 @@
-# Code Review: Phase 6 — deck assembly and the P1–P8 pre-flight (2026-08-02)
+# Code Review: Phase 7 — the integrated notebook and the demo project (2026-08-02)
 
-Reviews for Phases 0–5 are in the git history; all 30 of their findings were fixed.
+Reviews for Phases 0–6 are in the git history; all 34 of their findings were fixed.
 
 ## Review Scope
-- Plan: `docs/PLAN_...md`, Phase 6
-- Files: `deckbuild/deck.py`, `run_workflow.py`, `tests/test_deck.py`
-- Baseline: 282 tests pass; the full workflow is green end to end on `demo_planar`,
-  producing a runnable deck with all eight pre-flight gates passing.
+- Plan: `docs/PLAN_...md`, Phase 7
+- Files: `deck_workflow.ipynb`, `tests/test_notebook.py`, `pytest.ini`,
+  `data/demo_planar/demo_planar.puml.h5`, `README.md`
+- Baseline: 293 tests pass; the notebook executes end to end in ~2 s with every gate
+  battery printing and no `[FAIL]`.
 
 ## Findings
 
-### [R-601] CRITICAL [deck.py:preflight] — P1's sha256 check could never fire
+### [R-701] MODERATE [deck_workflow.ipynb / run_workflow.py] — both write to the SAME deck directory
 
 **Category:** BUG
 
 **Description:**
-P1 looked the deck's files up in the manifest keyed on `Path(artifact["path"]).name` —
-the **source** filename in `outputs/` (e.g. `friction_depth_profile.nc`). But the deck
-copy is deliberately **renamed** so the filename encodes the design
-(`demo_planar_friction_case1.nc`). The names never match, so `r in by_name` was always
-False and the hash comparison was dead code.
+The notebook derives `DECK = decks/{name}_{RUN_TAG}` and `run_workflow.py` derives the
+identical path from the same tag. They do **not** produce the same deck — the notebook
+adds a `Tnuc_s` nucleation LuaMap that the CLI runner does not — yet both call
+`assemble(..., overwrite=True)`. Whichever ran last silently wins, and a user who runs the
+notebook, then the CLI, then inspects `decks/…` is looking at a deck that is not the one
+their notebook reported on.
 
-The tamper test proved it: corrupting eight bytes of a shipped nc left P1 reporting
-"bad none". The gate advertised integrity checking and delivered none.
+This is the same class as the legacy "shared `outputs/graded_fw/`" defect the plan cites,
+where a stale pre-edit file was copied into a deck.
 
-**Trigger:** Edit any nc inside an assembled deck and run `preflight`.
+**Trigger:** Run the notebook, then `python run_workflow.py`, then read the deck.
 
-**Suggested fix:** Record the DECK filenames at assemble time.
+**Suggested fix:** Make the producer part of the path, and record it.
 ```diff
-+        man.stages["deck_files"] = {
-+            e["filename"]: sha256_file(Path(e["dst"])) for e in paths.values()}
+-DECK = B.root / "decks" / f"{cfg.name}_{RUN_TAG}"
++DECK = B.root / "decks" / f"{cfg.name}_{RUN_TAG}_nb"     # _nb: the notebook's own deck
 ```
+and in `run_workflow.py`:
 ```diff
--        by_name = {Path(a["path"]).name: a for st in man.get("stages", {}).values()
--                   for a in st.get("artifacts", [])}
-+        by_name = man.get("stages", {}).get("deck_files", {})
+-    deck = ROOT / "decks" / f"{cfg.name}_{tag}"
++    deck = ROOT / "decks" / f"{cfg.name}_{tag}_cli"
 ```
-
-**Test case:** `test_P1_flags_a_tampered_file` (now passing; it failed with a traceback
-before, which is how R-602 surfaced).
 
 ---
 
-### [R-602] MODERATE [deck.py:preflight] — a corrupt deck produced a traceback, not a report
+### [R-702] LOW [deck_workflow.ipynb] — the notebook re-derives paths the runner already computes
 
-**Category:** BUG
+**Category:** QUALITY
 
 **Description:**
-With a corrupted nc in the deck, `preflight` crashed with
-`OSError: [Errno -101] NetCDF: HDF error` from a downstream gate before any report was
-returned. The entire point of a pre-flight is to tell you what is wrong *before* you
-queue a job; a traceback with no gate output is the opposite.
+Section [1] hand-builds `OUT` and `DECK` and `mkdir`s the subdirectories, duplicating
+`run_workflow.py`. The two can drift — and R-701 is exactly that drift. A shared helper
+(`deckbuild.layout.run_paths(cfg, tag, producer)`) would make one the definition and the
+other a caller.
 
-**Suggested fix:** Short-circuit after P1 when a referenced file is missing or unreadable.
-```diff
-+        if missing or bad_hash:
-+            for g in ("P2", "P3", "P4", "P5", "P6", "P7", "P8"):
-+                rep.skip(g, "not attempted: P1 found a missing or unreadable referenced "
-+                            "file, so the downstream checks cannot be trusted")
-+            return rep
-```
+Not fixed now: it is a refactor, and the plan's rule is to implement the phase, not
+restructure. Recorded for Phase 9's cleanup.
 
 ---
 
-### [R-603] MODERATE [deck.py:_collect_refs] — the mesh was reported as an unaccounted extra
-
-**Category:** BUG
-
-**Description:**
-`_collect_refs` scanned only the YAMLs for `file:` targets. The mesh is named by
-`MeshFile` in `parameters.par` (without its `.puml.h5` suffix), so P1 saw the mesh sitting
-in the deck, could not match it to any reference, and reported it as an unexplained extra
-— failing a deck that was in fact correct. A gate that cries wolf on every valid deck gets
-ignored, which then hides the real case it exists for.
-
-**Suggested fix:** Parse `MeshFile` from `parameters.par` and resolve the suffix.
-
----
-
-### [R-604] MODERATE [deck.py:_check_yield] — P5 skipped whenever the grids differ, i.e. always
+### [R-703] LOW [tests/test_notebook.py] — the execution test does not assert the deck it produced
 
 **Category:** DEVIATION
 
 **Description:**
-P5 compared the stress and plasticity fields elementwise and skipped if their shapes
-differed. The four grids are **independent by design** — the shipped SAFS ones are
-material 1500/250, stress 1000/250 — so they essentially always differ and P5 never ran.
+`test_notebook_runs_end_to_end_under_five_minutes` asserts the gate text and the wall
+clock, but not that a deck folder now exists with the expected files. A notebook that
+printed every gate and then failed to write anything would pass.
 
-**Suggested fix:** Sample the plasticity onto the stress grid with `trilinear_sample`,
-which is what ASAGI does at run time anyway. P5 now runs and reports
-`0 of 350,811 grid points yield`.
+**Suggested fix:** Assert the deck directory and its manifest exist after the run.
 
 ---
 
 ## Summary
-- Critical: 1 (R-601) | Moderate: 3 (R-602, R-603, R-604) | Low: 0
-- Plan compliance: **FULL** — assemble (copy-not-symlink, verified by hash), the filename
-  contract, `resolve_paths` as a dry run, preserved hand-written notes, `diff`, and all
-  eight pre-flight gates.
-- Verdict: **PASS WITH FIXES** — all four fixed in this round.
+- Critical: 0 | Moderate: 1 (R-701) | Low: 2 (R-702, R-703)
+- Plan compliance: **FULL** — eight sections, one assignments-only PARAMETERS cell each,
+  physics stated before the code, the demo running with zero downloads and no gmsh under
+  the 5-minute budget, section [2] explicit that it ingests rather than builds, and the
+  retarget checklist in the README.
+- Verdict: **PASS WITH FIXES** — R-701 and R-703 fixed in this round.
 
 ## Checked and found correct
-- Copy, never symlink; every copy is sha256-verified against its source.
-- The prefix comes from the descriptor; no filename starts with a hardcoded `safs_`.
-- The YAML `file:` field and the copied filename come from the same variable, and P1
-  re-checks that on disk.
-- Regenerating a deck preserves the hand-written notes block verbatim.
-- Assembly refuses artifacts built from two different descriptors.
-- P6 is a WARN and says so in its own detail: kappa is necessary, not sufficient.
-- P8 catches a `z = 0` receiver, a literal `0.0` in `OutputRegionBounds`, and
-  `wavefieldoutput = 0` — three defects that each cost real runs.
-- `diff` reports exactly one changed file for a one-byte edit.
+- All 20 PARAMETERS values are actually consumed downstream (probed by counting
+  references); none is decorative.
+- Every PARAMETERS cell parses to assignments only — no logic hidden where a user edits.
+- The notebook contains no absolute path and no network access of any kind.
+- Material precedes stress and friction, and the intro says why the order is load-bearing.
+- The six gotchas that cost real runs are stated in the prose the user reads: the dropped
+  `z = 0` receiver, the silently-ignored spatial `rs_muw`, `bulkFriction` being a
+  coefficient, kappa being necessary-not-sufficient, sea-level depth referencing, and the
+  strike-slip assumption behind the Andersonian closure.

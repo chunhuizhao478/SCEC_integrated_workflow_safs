@@ -192,7 +192,10 @@ def main(argv=None) -> int:
         rep = st.preflight(cfg, dpath, spec=spec)
         rep.print()
         return dpath, rep
-    deck = ROOT / "decks" / f"{cfg.name}_{tag}"
+    # _cli, not the bare tag: the notebook writes _nb.  They do NOT build the same
+    # deck (the notebook adds a Tnuc_s LuaMap), and both assemble with
+    # overwrite=True, so a shared path would let whichever ran last silently win.
+    deck = ROOT / "decks" / f"{cfg.name}_{tag}_cli"
     (dpath, drep), ddt = stage("[7] DECK      assemble + pre-flight (P1-P8)", _deck)
     all_ok &= drep.ok
     man.record("deck", report=drep, wall_s=round(ddt, 3), path=str(dpath))

@@ -4,11 +4,10 @@ Build every input a SeisSol dynamic-rupture simulation needs, from **raw data**,
 fault system** — then use those freshly built files to determine the physical parameters,
 and write a folder you can run.
 
-> **Status: under construction.** Phases 0–6 of 9 are implemented, and the chain runs end to
+> **Status: under construction.** Phases 0–7 of 9 are implemented, and the chain runs end to
 > end: `python run_workflow.py --project demo_planar` builds material, plasticity, Sv,
-> stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. `run_workflow.py` now assembles a runnable deck and
-> runs the P1-P8 pre-flight.  The notebook is Phase 7 and the SAFS reproduction
-> exercise Phase 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
+> stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. Open **`deck_workflow.ipynb`** and Run All, or use
+> `run_workflow.py` headlessly.  The SAFS reproduction exercise is Phase 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
 
 ## The idea
 
@@ -53,7 +52,8 @@ data/<project>/     raw inputs and caches (gitignored, except the demo mesh)
 conda env create -f environment.yml
 conda activate deckbuild
 pytest -q
-python run_workflow.py --project demo_planar    # the chain, end to end
+jupyter lab deck_workflow.ipynb                 # the guided workflow
+python run_workflow.py --project demo_planar    # or headless, same chain
 ```
 
 > **Validated on:** Python 3.13 / pytest 9.0.2 / PyYAML 6.0.3, via an existing conda env.
