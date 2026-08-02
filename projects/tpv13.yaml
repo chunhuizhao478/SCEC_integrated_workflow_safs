@@ -1,0 +1,104 @@
+# TPV13 -- SCEC benchmark: a 60-degree DIPPING NORMAL fault.
+#
+# The Phase 9 generality test.  It exercises three descriptor paths SAFS never touches:
+#   * a CONSTANT material (no community velocity model)
+#   * an ANALYTIC stress (a depth-dependent !LuaMap, NOT the Andersonian closure)
+#   * a NON-strike-slip tectonic regime
+#
+# STATUS: the descriptor loads and validates.  The `analytic` stress kind is NOT yet
+# implemented -- see docs/PLAN section Phase 9 requirement 2.  TPV13's stress is
+#     s_zz = -9.8*(2700-1000)*depth
+#     s_xx = -round2(0.5*(1+0.3496)*grad)*depth,  s_yy = -round2(0.3496*grad)*depth
+# above 11951.15 m and isotropic below, with math.floor(x+0.5) rounding that is
+# load-bearing.  The Andersonian C1 closure CANNOT express that, and bending it to fit
+# would be the wrong move: the two recipes coexist.
+#
+# Source deck: miniapps/seas/safs/seisol_quakeworx/tpv13/ (a complete working deck with
+# its own mesh, tpv13_training.puml.h5).
+
+name: tpv13
+
+crs:
+  epsg: "EPSG:32611"          # TPV13 is in a local Cartesian frame; any metric CRS works
+  geographic_epsg: "EPSG:4326"
+
+strike:
+  azimuth_deg: 0.0            # the TPV13 fault strikes along y
+  origin_xy: [0.0, 0.0]
+
+stress_box:
+  xmin: -20000.0
+  xmax: 20000.0
+  ymin: -25000.0
+  ymax: 25000.0
+  zmin: -20000.0
+  zmax: 0.0
+  dx: 500.0
+  dz: 250.0
+
+meshes:
+  training:
+    path: tpv13_training.puml.h5
+    fault_bc: 3
+    tag_to_bc: {101: 3, 102: 1, 103: 5, 104: 5}
+    daylights: false
+    daylight_min_depth_m: 0.0
+    gates:
+      fault_edge_max_m: 2000.0
+      f_gate_hz: 0.05
+      partition_tol_m: 50.0
+
+default_mesh: training
+
+gate_bands: []                # TPV13 has no named restraining bend
+
+hypocenters:
+  training:
+    x: 0.0
+    y: 0.0
+    z: -10392.3               # the TPV13 nucleation, on the 60-degree dipping plane
+    snap_tol_m: 2000.0
+    label: "TPV13 nucleation"
+
+physics:
+  mu_shear_pa: 2.9403e+10     # from the deck's !ConstantMap, not a SAFS default
+  w_energy_m: 10.0e+3
+  dc_m: 0.5                   # TPV13 slip-weakening distance
+  kappa_c: 0.9
+  seis_band_km: [3.0, 12.0]
+  active_band_km: [0.3, 15.0]
+  l_coast_km: 6.0
+  gap_max_km: 4.0
+  sn_floor_mpa: 30.0
+  rs_b: 0.019
+  rs_sl0: 0.10
+
+raw:
+  orientation:
+    kind: constant            # no community stress model
+    params:
+      azimuth_deg: 90.0
+      shape_ratio: 0.5
+  velocity:
+    kind: layered_1d          # the deck's !ConstantMap medium, as a 1-D model
+    params:
+      depth_m: [0.0, 20000.0]
+      vp: [5716.0, 5716.0]    # from rho 2700, mu 2.9403e10, lambda 2.941e10
+      vs: [3300.0, 3300.0]
+      rho: [2700.0, 2700.0]
+      grid_dx: 1000.0
+      dz: 250.0
+      z_min: -20000.0
+      z_max: 0.0
+  thermal:
+    kind: depth_profile       # TPV13 is linear slip-weakening, not rate-and-state;
+    params:                   # this stands in so the friction stage has a source
+      a_minus_b_knots_m: [0.0, -20000.0]
+      a_minus_b_values: [-0.004, -0.004]
+      vw_knots_m: [0.0, -20000.0]
+      vw_values: [0.05, 0.05]
+
+provenance:
+  purpose: "Phase 9 generality test: a dipping NORMAL fault with analytic stress"
+  source_deck: "miniapps/seas/safs/seisol_quakeworx/tpv13/"
+  blocked_on: "the `analytic` stress kind (plan Phase 9 req 2) is not implemented"

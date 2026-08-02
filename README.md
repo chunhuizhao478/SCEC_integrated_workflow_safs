@@ -4,10 +4,12 @@ Build every input a SeisSol dynamic-rupture simulation needs, from **raw data**,
 fault system** — then use those freshly built files to determine the physical parameters,
 and write a folder you can run.
 
-> **Status: under construction.** Phases 0–7 of 9 are implemented, and the chain runs end to
+> **Status: under construction.** Phases 0–7 complete; 8 partial, 9 partial, and the chain runs end to
 > end: `python run_workflow.py --project demo_planar` builds material, plasticity, Sv,
 > stress, friction and the `rs_muw` LuaMap from raw inputs, gating each stage. Open **`deck_workflow.ipynb`** and Run All, or use
-> `run_workflow.py` headlessly.  The SAFS reproduction exercise is Phase 8. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
+> `run_workflow.py` headlessly.  Phase 8 (SAFS reproduction) is PARTIAL -- see
+> `docs/EXERCISE_safs_reproduction.md`: the grid reproduces exactly, the values do not
+> yet.  `CODEBASE_GUIDE.md` is the module map. Full plan: `docs/PLAN_integrated_workflow_notebook_2026-08-01.md`.
 
 ## The idea
 
@@ -38,6 +40,7 @@ projects/           one descriptor per fault system
   safs_alt.yaml       San Andreas, ALT geometry
   safs_preferred.yaml San Andreas, PREFERRED geometry
   demo_planar.yaml    a synthetic example that runs with zero downloads
+  tpv13.yaml          a 60-deg dipping NORMAL fault (the generality test)
 docs/               the plan and the component exploration
 skills/             the vendored mesh build-and-improve skill (see MESHING.md)
 tools/              make_demo_mesh.py

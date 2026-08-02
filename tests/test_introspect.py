@@ -107,3 +107,33 @@ def test_the_four_grids_are_independent():
     assert "dx=1500 dz=250" in f["material_grid"]
     assert "dx=1000 dz=250" in f["stress_grid"]
     assert "dx=1500 dz=200" in f["friction_grid"]
+
+
+# ------------------------------------------------- Phase 9: the second system
+def test_tpv13_descriptor_loads_and_is_not_safs():
+    """A 60-degree dipping NORMAL fault: three descriptor paths SAFS never touches."""
+    from deckbuild.config import Project
+    cfg = Project.load(ROOT / "projects" / "tpv13.yaml", require_files=False)
+    assert cfg.name == "tpv13"
+    assert cfg.raw.orientation.kind == "constant"      # no community stress model
+    assert cfg.raw.velocity.kind == "layered_1d"       # a !ConstantMap medium
+    assert cfg.gate_bands == ()                        # no named restraining bend
+    assert cfg.physics.mu_shear_pa == 2.9403e10        # the deck's own, not the default
+    assert cfg.strike.azimuth_deg != 314.0
+
+
+def test_no_runtime_import_of_the_legacy_tree():
+    """The package must stand alone; the legacy modules are a TEST reference only."""
+    import re
+    for f in sorted((ROOT / "deckbuild").glob("*.py")):
+        code = re.sub(r'""".*?"""', "", f.read_text(), flags=re.S)
+        code = "\n".join(ln for ln in code.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        for bad in ("combined_workflow", "v3_under_construction", "seas-mfem"):
+            assert bad not in code, f"{f.name} imports from the legacy tree"
+
+
+def test_codebase_guide_records_the_legacy_decision():
+    t = (ROOT / "CODEBASE_GUIDE.md").read_text()
+    assert "combined_workflow" in t and "KEEP, frozen" in t
+    assert "stress_build_workflow" in t and "retire" in t
