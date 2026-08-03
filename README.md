@@ -77,8 +77,12 @@ headless and is the right choice for batch jobs, HPC and CI:
 
 ```bash
 conda activate deckbuild
-python run_workflow.py --project <name>
+python run_workflow.py --project demo_planar
 ```
+
+`demo_planar` is a synthetic example that needs **zero downloads** — it builds its own mesh
+and runs the full seven-stage chain, so it is the fastest way to confirm a working install.
+Swap in any descriptor from `projects/` once your own raw data is staged.
 
 ### If you run JupyterLab from somewhere else
 
@@ -108,15 +112,6 @@ kernel picker at the top right and select the `deckbuild` interpreter.
 > ```python
 > import sys; print(sys.executable)
 > ```
-
-Prefer to stay in the terminal? The same chain runs headless, no kernel needed:
-
-```bash
-python run_workflow.py --project demo_planar
-```
-
-`demo_planar` is a synthetic example that needs **zero downloads** — it builds its own mesh
-and runs the full seven-stage chain, so it is the fastest way to confirm a working install.
 
 ### Validated environment
 
