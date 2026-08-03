@@ -91,7 +91,7 @@ def build_uniform_grid(cx, cy, dx: float):
 
 
 def interp_slices(paths, crs, field_names, grid_dx, z_min, z_max, dz,
-                  extend_z_top=0.0, expect_spacing_m=None):
+                  extend_z_top=0.0, expect_spacing_m=None, warn_on_gap=True):
     """The full two-stage pipeline.  Returns (gx, gy, gz, {field: (nz,ny,nx)}, info)."""
     from pyproj import Transformer
     from scipy.interpolate import LinearNDInterpolator
@@ -108,7 +108,11 @@ def interp_slices(paths, crs, field_names, grid_dx, z_min, z_max, dz,
         d = np.diff(depths)
         gaps = [(float(depths[i]), float(depths[i + 1]))
                 for i in np.flatnonzero(d > 1.5 * expect_spacing_m)]
-        if gaps:
+        # `gaps` is ALWAYS returned in `info`.  The warning is only for callers that do
+        # not read it.  MaterialStage does, and passes warn_on_gap=False, because in a
+        # notebook `warnings.warn` goes to stderr -- which JupyterLab paints on a red
+        # background, so an expected, documented condition reads as a crash.
+        if gaps and warn_on_gap:
             warnings.warn(f"{len(gaps)} missing depth level(s): {gaps}; those output "
                           f"nodes are the linear interpolant of their neighbours",
                           stacklevel=2)

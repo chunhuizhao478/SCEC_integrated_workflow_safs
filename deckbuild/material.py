@@ -153,7 +153,8 @@ def _layered_1d(cfg: Project, p):
 
     def bc(a):
         return np.broadcast_to(a[:, None, None], shape).copy()
-    return gx, gy, gz, {"rho": bc(rho), "mu": bc(mu), "lambda": bc(lam)}
+    # uniform reader contract: (gx, gy, gz, fields, info)
+    return gx, gy, gz, {"rho": bc(rho), "mu": bc(mu), "lambda": bc(lam)}, {"gaps": []}
 
 
 def _cvm_slices(cfg: Project, p, path_glob=None):
@@ -175,6 +176,7 @@ def _cvm_slices(cfg: Project, p, path_glob=None):
         z_min=float(p.get("z_min", -45000.0)), z_max=float(p.get("z_max", 100.0)),
         dz=float(p.get("dz", 250.0)),
         extend_z_top=float(p.get("extend_z_top", 100.0)),
+        warn_on_gap=False,          # the stage reports info["gaps"] itself
         expect_spacing_m=p.get("expect_spacing_m"))
     vp, vs, rho = (f3[c] for c in cols)
     mu = rho * vs ** 2
@@ -186,7 +188,7 @@ def _cvm_slices(cfg: Project, p, path_glob=None):
             f"M1: lambda = rho(Vp^2 - 2Vs^2) <= 0 at {bad} node(s); worst at flat index "
             f"{i} (Vp={vp.ravel()[i]:.1f}, Vs={vs.ravel()[i]:.1f}, "
             f"rho={rho.ravel()[i]:.1f}).  This is a bad velocity model, not a code bug.")
-    return gx, gy, gz, {"rho": rho, "mu": mu, "lambda": lam}
+    return gx, gy, gz, {"rho": rho, "mu": mu, "lambda": lam}, info
 
 
 def _ctm_slices(cfg: Project, p, path_glob=None):
@@ -202,8 +204,9 @@ def _ctm_slices(cfg: Project, p, path_glob=None):
         z_min=float(p.get("z_min", -21000.0)), z_max=float(p.get("z_max", 0.0)),
         dz=float(p.get("dz", 200.0)),
         extend_z_top=float(p.get("extend_z_top", 200.0)),
-        expect_spacing_m=p.get("expect_spacing_m", 200.0))
-    return gx, gy, gz, {"T": f1[cols[0]]}
+        expect_spacing_m=p.get("expect_spacing_m", 200.0),
+        warn_on_gap=False)          # the stage reports info["gaps"] itself
+    return gx, gy, gz, {"T": f1[cols[0]]}, info
 
 
 VELOCITY_READERS = {"layered_1d": _layered_1d, "cvm_slices": _cvm_slices}
@@ -226,8 +229,16 @@ class MaterialStage(Stage):
                 f"velocity kind {spec.kind!r} is not implemented yet; have "
                 f"{sorted(VELOCITY_READERS)}")
         rd = VELOCITY_READERS[spec.kind]
-        gx, gy, gz, flds = (rd(cfg, dict(spec.params), spec.path)
-                            if spec.kind == "cvm_slices" else rd(cfg, dict(spec.params)))
+        gx, gy, gz, flds, vinfo = (rd(cfg, dict(spec.params), spec.path)
+                                   if spec.kind == "cvm_slices"
+                                   else rd(cfg, dict(spec.params)))
+        # Report a missing source level on STDOUT, as a plain note.  It is expected -- the
+        # CTM legitimately lacks one level -- and routing it through warnings.warn puts it
+        # on stderr, which JupyterLab paints red and every reader has read as a crash.
+        for lo_, hi_ in vinfo.get("gaps", []):
+            print(f"  note: velocity source has no level between {lo_:.0f} and {hi_:.0f} m; "
+                  f"those output nodes are the exact linear interpolant of their "
+                  f"neighbours.  Expected, not an error.")
 
         out = MaterialArtifacts()
         mpath = out_dir / f"{prefix}material.nc"
@@ -270,7 +281,11 @@ class MaterialStage(Stage):
 
         if thermal and cfg.raw.thermal is not None and cfg.raw.thermal.kind == "ctm_slices":
             ts = cfg.raw.thermal
-            tx, ty, tz, tf = _ctm_slices(cfg, dict(ts.params), ts.path)
+            tx, ty, tz, tf, tinfo = _ctm_slices(cfg, dict(ts.params), ts.path)
+            for lo_, hi_ in tinfo.get("gaps", []):
+                print(f"  note: thermal source has no level between {lo_:.0f} and "
+                      f"{hi_:.0f} m; those output nodes are the exact linear interpolant "
+                      f"of their neighbours.  Expected, not an error.")
             tpath = out_dir / f"{prefix}thermal_T.nc"
             write_asagi(tpath, tx, ty, tz, tf, dtype=dtype, attrs={
                 "title": f"{cfg.name} temperature", "source": "ctm_slices",

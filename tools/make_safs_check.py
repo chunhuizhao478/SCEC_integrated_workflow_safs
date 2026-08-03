@@ -139,21 +139,29 @@ def _src(c):
     return "".join(c["source"])
 
 
-def _set(c, s):
+def _lines(s):
+    """nbformat source list: one entry per line, newline-terminated except the last.
+
+    Strip a trailing newline FIRST -- otherwise the split leaves an empty final element,
+    which is legal JSON but differs from what every other cell looks like, and made the
+    round-trip check report permanent drift.
+    """
+    s = s.rstrip("\n")
     lines = s.split("\n")
-    c["source"] = [ln + "\n" for ln in lines[:-1]] + [lines[-1]]
+    return [ln + "\n" for ln in lines[:-1]] + [lines[-1]]
+
+
+def _set(c, s):
+    c["source"] = _lines(s)
 
 
 def _code(s, ident):
-    lines = s.split("\n")
     return {"cell_type": "code", "execution_count": None, "id": ident, "metadata": {},
-            "outputs": [], "source": [ln + "\n" for ln in lines[:-1]] + [lines[-1]]}
+            "outputs": [], "source": _lines(s)}
 
 
 def _md(s, ident):
-    lines = s.rstrip().split("\n")
-    return {"cell_type": "markdown", "id": ident, "metadata": {},
-            "source": [ln + "\n" for ln in lines[:-1]] + [lines[-1]]}
+    return {"cell_type": "markdown", "id": ident, "metadata": {}, "source": _lines(s)}
 
 
 COMPARE_CELLS = [
@@ -335,11 +343,32 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     nb = build()
-    text = json.dumps(nb, indent=1)
+    text = json.dumps(nb, indent=1, ensure_ascii=False)
     if a.check:
-        cur = DST.read_text() if DST.is_file() else ""
-        if cur.strip() != text.strip():
-            print("safs_check.ipynb is OUT OF SYNC with deck_workflow.ipynb.\n"
+        # Compare the PARSED notebooks, not the serialized text.  Escaping (\u2014 vs a
+        # literal em dash) and indentation are not drift, and treating them as drift makes
+        # the guard cry wolf until someone disables it -- which is how a real drift then
+        # gets through.  What matters is the cell sources and their order.
+        def shape(o):
+            return [(c["cell_type"], "".join(c["source"])) for c in o["cells"]]
+
+        try:
+            cur = json.loads(DST.read_text()) if DST.is_file() else {"cells": []}
+        except json.JSONDecodeError as exc:
+            print(f"safs_check.ipynb is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+        a_, b_ = shape(cur), shape(nb)
+        if a_ != b_:
+            for i, (x, y) in enumerate(zip(a_, b_)):
+                if x != y:
+                    print(f"first divergence at cell {i}:\n"
+                          f"--- on disk ---\n{x[1][:300]}\n"
+                          f"--- regenerated ---\n{y[1][:300]}", file=sys.stderr)
+                    break
+            else:
+                print(f"cell COUNT differs: {len(a_)} on disk vs {len(b_)} regenerated",
+                      file=sys.stderr)
+            print("\nsafs_check.ipynb is OUT OF SYNC with deck_workflow.ipynb.\n"
                   "Run:  python tools/make_safs_check.py", file=sys.stderr)
             return 1
         print("safs_check.ipynb is in sync with deck_workflow.ipynb")
