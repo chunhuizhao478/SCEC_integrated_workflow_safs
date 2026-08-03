@@ -238,7 +238,12 @@ def test_every_source_pointer_in_the_notebooks_resolves():
                 ok = False
                 for nm in names:
                     for probe in range(max(1, num - TOL), min(len(body), num + TOL) + 1):
-                        if re.match(rf"\s*(def|class)\s+{re.escape(nm)}\b", body[probe - 1]):
+                        ln = body[probe - 1]
+                        # a def, a class, OR a module-level binding: a registry dict like
+                        # READERS = {...} is a perfectly good thing to point someone at,
+                        # and it is the extension point for a new reader.
+                        if (re.match(rf"\s*(def|class)\s+{re.escape(nm)}\b", ln)
+                                or re.match(rf"{re.escape(nm)}\s*(:[^=]+)?=", ln)):
                             ok = True
                             break
                     if ok:
