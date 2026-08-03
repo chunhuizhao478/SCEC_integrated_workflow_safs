@@ -27,7 +27,7 @@ import numpy as np
 from deckbuild.config import CRS, ConfigError, SourceSpec
 
 __all__ = ["OrientationField", "read_orientation", "OrientationError",
-           "read_csm_csv", "csm_tensors_tension", "csm_axes_and_shape",
+           "read_csm_csv", "csm_tensors_tension", "csm_axes_and_shape", "shmax_from_sigma",
            "interpolate_csm_field"]
 
 EPS = 1.0e-9
@@ -51,6 +51,7 @@ class OrientationField:
     R: np.ndarray
     kind: str = ""
     n_dropped: int = 0
+    S: np.ndarray | None = None      # (N, 6) tension-positive tensor samples, csm_csv only
 
     @property
     def is_uniform(self) -> bool:
@@ -63,10 +64,20 @@ class OrientationField:
         if self.is_uniform:
             return (np.full(qx.shape, float(self.az_deg)),
                     np.full(qx.shape, float(self.R)), 0)
-        # Interpolate the azimuth as a UNIT VECTOR doubled in angle, never as a raw
-        # number: SHmax is an axis with period 180 deg, so averaging 179 and 1 must give
-        # 0, not 90.  The legacy pipeline interpolated the tensor and re-derived the
-        # azimuth, which has the same effect.
+        if self.S is not None:
+            # INTERPOLATE THE TENSOR, then derive az and R at the query points.  This is
+            # what the legacy does (step2_grid.py:42-45) and the order is NOT
+            # interchangeable with deriving first and interpolating the result: on the
+            # shipped ALT grid the two differ by up to 1.0e8 Pa in s_xx/s_yy/s_xy.
+            # Interpolating a doubled-angle unit vector is the right way to average
+            # AZIMUTHS, but it is not what produced the shipped file.
+            vals, n_fb = interpolate_csm_field(self.cx, self.cy, self.S, qx, qy)
+            T = csm_tensors_tension(vals)
+            return (shmax_from_sigma(-T), np.clip(csm_axes_and_shape(T)[1], 0.0, 1.0),
+                    n_fb)
+        # No tensor available (constant / callable readers): average the azimuth as a
+        # UNIT VECTOR DOUBLED IN ANGLE, never as a raw number -- SHmax has period 180 deg,
+        # so averaging 179 and 1 must give 0, not 90.
         a2 = np.radians(2.0 * self.az_deg)
         stack = np.stack([np.cos(a2), np.sin(a2), self.R], axis=1)
         vals, n_fb = interpolate_csm_field(self.cx, self.cy, stack, qx, qy)
@@ -137,6 +148,20 @@ def csm_axes_and_shape(T_tension):
     return U, R_eig
 
 
+def shmax_from_sigma(sigma):
+    """Azimuth (deg E of N, in [0,180)) of the most-compressive eigenvector of the
+    horizontal 2x2 block of the COMPRESSION-POSITIVE tensor.
+
+    VERBATIM from the legacy `project_csm_stress_to_vtu.shmax_from_sigma`.  Callers pass
+    -T, where T is the tension-positive CSM tensor.
+    """
+    h = sigma[:, :2, :2]
+    w, U = np.linalg.eigh(h)                  # ascending
+    v = U[:, :, 1]                            # most compressive (e, n)
+    az = np.degrees(np.arctan2(v[:, 0], v[:, 1]))   # E of N
+    return np.mod(az, 180.0)
+
+
 def interpolate_csm_field(cx, cy, values, qx, qy):
     """Delaunay-linear interpolation with nearest-neighbour fallback outside the hull.
 
@@ -171,22 +196,38 @@ def _read_csm(spec: SourceSpec, crs: CRS, data_dir) -> OrientationField:
     #      4 -> Sen       (the tensor read shifted by one component)
     # The defaults below are the 0-based indices of SHmax, R and See.  Gate O1 in
     # read_orientation() re-checks them against the data so this cannot recur silently.
+    # DERIVE az and R FROM THE TENSOR -- exactly what the legacy does
+    # (lib/step1_orientation.py:43-44, all three copies):
+    #     az_pts = shmax_from_sigma(-T)
+    #     R_pts  = clip(csm_axes_and_shape(T)[1], 0, 1)
+    # and the legacy reads ONLY lon, lat and the six tensor components
+    # (generate_stress_nc_from_raw.py:111-112, COL_S = slice(3, 9)).  It never reads an
+    # author SHmax or R column at all.
+    #
+    # The author columns are still read, but ONLY to cross-check the derivation (gate O1).
+    # They are not what the stress is built from.  Their indices are 0-BASED while the csv
+    # header numbers its columns 1-BASED, which is how an earlier version of this reader
+    # ended up on SHmax_unc and Aphi.
     col_shmax = int(p.get("shmax_col", 9))
     col_R = int(p.get("shape_ratio_col", 12))
+    tcol0 = int(p.get("tensor_col0", 3))
     raw = read_csm_csv(path, int(p.get("lon_col", 0)), int(p.get("lat_col", 1)),
-                       slice(int(p.get("tensor_col0", 3)), int(p.get("tensor_col0", 3)) + 6),
-                       col_shmax=col_shmax, col_R=col_R)
+                       slice(tcol0, tcol0 + 6), col_shmax=col_shmax, col_R=col_R)
     from pyproj import Transformer
     tf = Transformer.from_crs(crs.geographic_epsg, crs.epsg, always_xy=True)
     cx, cy = tf.transform(raw["lon"], raw["lat"])
 
-    az = np.asarray(raw["shmax"], float)
-    R = np.asarray(raw["R"], float)
+    S = np.asarray(raw["S"], float)
+    T = csm_tensors_tension(S)                       # tension-positive, as stored
+    az = shmax_from_sigma(-T)                        # -T -> compression-positive
+    R = csm_axes_and_shape(T)[1]
     finite = np.isfinite(az) & np.isfinite(R)
     if not finite.any():
         raise OrientationError(
-            f"{path}: no row has a finite SHmax (col {col_shmax}) and R (col {col_R})")
+            f"{path}: no row yields a finite SHmax and R from the tensor columns "
+            f"{tcol0}-{tcol0 + 5}")
     n_dropped = raw["n_dropped"] + int((~finite).sum())
+
     # GATE O1 -- are shmax_col and shape_ratio_col pointing at the right columns?
     # They sit next to look-alikes (SHmax_unc, phi, Aphi), and the csv header numbers its
     # columns 1-BASED, so an off-by-one is the expected mistake rather than an exotic one.
@@ -196,47 +237,65 @@ def _read_csm(spec: SourceSpec, crs: CRS, data_dir) -> OrientationField:
     #     SHmax_unc is in degrees, so either one fails this outright;
     #   * R must agree with the eigendecomposition of the tensor, which is what makes
     #     this a check on the COLUMN CHOICE and not merely on the range.
-    _audit_csm_columns(np.asarray(raw["S"], float), az, R, col_shmax, col_R, path)
+    _audit_csm_columns(raw, az, R, col_shmax, col_R, path)
     return OrientationField(cx=np.asarray(cx)[finite], cy=np.asarray(cy)[finite],
                             az_deg=az[finite] % 180.0, R=np.clip(R[finite], 0.0, 1.0),
-                            kind="csm_csv", n_dropped=n_dropped)
+                            kind="csm_csv", n_dropped=n_dropped, S=S[finite])
 
 
-def _audit_csm_columns(S, az, R, col_shmax, col_R, path, tol=0.05):
-    """Raise if the named columns cannot be SHmax and R.  Called by _read_csm.
+def _audit_csm_columns(raw, az_derived, R_derived, col_shmax, col_R, path,
+                       az_tol_deg=2.0, r_tol=0.02):
+    """GATE O1 -- cross-check the tensor derivation against the author columns.
 
-    This exists because the shipped SAFS descriptors read columns 10 and 13 -- the
-    1-based header numbers for SHmax and R -- which as 0-based indices are SHmax_unc and
-    Aphi.  Every gate passed: V2 checks the eigenvalue RATIO k, which is blind to both
-    the azimuth and R, so a completely wrong orientation field sailed through.
+    az and R are DERIVED from the tensor (the legacy path), so this is not what the
+    stress is built from.  It exists because the author columns sit next to look-alikes
+    -- SHmax_unc, phi, Aphi -- and the csv header numbers its columns 1-BASED while these
+    indices are 0-BASED.  An earlier version of this reader took the header's numbers
+    literally and read SHmax_unc as the azimuth and Aphi as R, which moved on-fault
+    mu_app by 21% and passed every stress gate: V2 checks the eigenvalue RATIO k, which
+    is blind to both the azimuth and R.
+
+    Disagreement means the COLUMNS are mis-identified (or the tensor slice is), not that
+    the physics is wrong -- so the message says which index to look at.
     """
-    good = np.isfinite(R)
+    az_c = np.asarray(raw.get("shmax"), float)
+    R_c = np.asarray(raw.get("R"), float)
+
+    good = np.isfinite(R_c)
     if good.any():
-        lo, hi = float(np.min(R[good])), float(np.max(R[good]))
-        if lo < -tol or hi > 1.0 + tol:
+        lo, hi = float(np.min(R_c[good])), float(np.max(R_c[good]))
+        if lo < -r_tol or hi > 1.0 + r_tol:
             raise OrientationError(
                 f"{path}: shape_ratio_col={col_R} has range [{lo:.3f}, {hi:.3f}], which "
-                f"is not a ratio in [0, 1].  The csv header numbers columns 1-BASED; if "
-                f"you took the index from it, subtract 1 (R is usually 0-based 12, and "
-                f"13 is Aphi).")
-    if S.shape[1] == 6 and good.any():
-        R_eig = csm_axes_and_shape(csm_tensors_tension(S))[1]
-        m = good & np.isfinite(R_eig)
+                f"is not a ratio in [0, 1].  The csv header numbers its columns 1-BASED; "
+                f"if you took the index from it, subtract 1 (R is 0-based 12; 13 is Aphi).")
+        m = good & np.isfinite(R_derived)
         if m.sum() > 100:
-            d = float(np.median(np.abs(R[m] - R_eig[m])))
-            if d > 0.05:
+            d = float(np.median(np.abs(R_derived[m] - R_c[m])))
+            if d > r_tol:
                 raise OrientationError(
-                    f"{path}: shape_ratio_col={col_R} disagrees with the shape ratio "
-                    f"derived from the tensor columns by a median of {d:.3f}.  Either "
-                    f"shape_ratio_col or tensor_col0 is off -- the header's column "
-                    f"numbers are 1-BASED, these indices are 0-BASED.")
-    afin = np.isfinite(az)
-    if afin.any() and float(np.max(np.abs(az[afin]))) <= 25.0:
-        raise OrientationError(
-            f"{path}: shmax_col={col_shmax} spans only "
-            f"[{float(np.min(az[afin])):.2f}, {float(np.max(az[afin])):.2f}] deg, which "
-            f"looks like an UNCERTAINTY column rather than an azimuth.  SHmax is usually "
-            f"0-based column 9; 10 is SHmax_unc.")
+                    f"{path}: R derived from the tensor columns disagrees with "
+                    f"shape_ratio_col={col_R} by a median of {d:.4f}.  Either that index "
+                    f"or tensor_col0 is wrong -- the header's numbers are 1-BASED, these "
+                    f"are 0-BASED.")
+
+    m = np.isfinite(az_c) & np.isfinite(az_derived)
+    if m.any():
+        span = float(np.max(az_c[m]) - np.min(az_c[m]))
+        if span <= 25.0:
+            raise OrientationError(
+                f"{path}: shmax_col={col_shmax} spans only {span:.2f} deg, which looks "
+                f"like an UNCERTAINTY column rather than an azimuth.  SHmax is 0-based "
+                f"column 9; 10 is SHmax_unc.")
+        if m.sum() > 100:
+            dd = np.abs(np.mod(az_derived[m] - (az_c[m] % 180.0), 180.0))
+            dd = np.minimum(dd, 180.0 - dd)
+            med = float(np.median(dd))
+            if med > az_tol_deg:
+                raise OrientationError(
+                    f"{path}: the azimuth derived from the tensor disagrees with "
+                    f"shmax_col={col_shmax} by a median of {med:.2f} deg.  Either that "
+                    f"index or tensor_col0 is wrong (0-BASED: SHmax 9, tensor 3-8).")
 
 
 def _read_constant(spec: SourceSpec, crs: CRS, data_dir) -> OrientationField:

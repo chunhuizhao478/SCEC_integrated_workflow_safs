@@ -117,6 +117,17 @@ def sv_profile_from_material(material_nc, g: float = G_ACCEL, rho_w: float = RHO
     span = ztop[0] - ztop                                       # 0 at the grid top
     col = np.concatenate([[0.0], np.cumsum(
         0.5 * (rho_td[1:] + rho_td[:-1]) * g * np.diff(span))]) / 1.0e6
+    # RE-REFERENCE THE VALUE, not just the axis: subtract Sv_total(depth = 0) so that
+    # Sv_total(0) == 0.  legacy: step3_vertical_stress.py:43, `sealevel_reference=True`,
+    # "subtract Sv_total(depth=0) so Sv_eff(0)=0".
+    #
+    # The integral starts at the GRID TOP, which on a topographic CVM is above sea level
+    # (+3250 m for SAFS).  Without this subtraction every column carries the overburden
+    # of that cap -- a CONSTANT 54.20 MPa offset at every depth on the shipped ALT grid,
+    # which is not a small error: it is 90% of Sv_eff at 500 m.  Naming the depth axis
+    # "sea-level referenced" is not enough; the value has to be too.
+    if depth[0] < 0.0:                       # the grid extends above sea level
+        col = col - float(np.interp(0.0, depth, col))
     pp = rho_w * g * np.maximum(depth, 0.0) / 1.0e6
     return depth, col - pp
 

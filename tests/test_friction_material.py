@@ -338,12 +338,24 @@ def _variant(tmp_path, **mut):
     return Project.load(p, require_files=False, data_dir=tmp_path / "data")
 
 
-def test_R301_sv_profile_is_sea_level_referenced(tmp_path):
-    """depth 0 must mean z = 0, whatever the material grid's z_max is.
+def test_R301_sv_is_sea_level_referenced_in_VALUE_not_only_in_depth(tmp_path):
+    """Sv_eff(depth = 0) must be EXACTLY 0, whatever the material grid's z_max is.
 
-    Grid-top referencing offset the WHOLE stress field by z_max (+3250 m for the shipped
-    SAFS CVM).  No gate caught it: V2 checks the eigenvalue RATIO k, which is invariant
-    under an overall scale of Sv.
+    Two distinct references have to be right and only one of them is the depth axis:
+
+      * the AXIS: depth 0 must mean z = 0, not the top of the grid.  Getting this wrong
+        offsets the whole field by z_max (+3250 m on the shipped SAFS CVM).
+      * the VALUE: the lithostat is integrated from the grid top, which on a topographic
+        CVM is above sea level, so the column arrives at z = 0 already carrying that
+        cap's overburden.  The legacy subtracts it --
+        `step3_vertical_stress.py:43`, `sealevel_reference=True`,
+        "subtract Sv_total(depth=0) so Sv_eff(0)=0".
+
+    An earlier version of this test asserted the OPPOSITE for the value (`sv[i] > 0`),
+    which left a CONSTANT 54.20 MPa offset at every depth on the shipped ALT grid -- 90%
+    of Sv_eff at 500 m.  It was caught only by reproducing a shipped production stress nc
+    bit-for-bit; no gate sees it, because V2 checks the eigenvalue RATIO k, which is
+    invariant under an overall scale of Sv.
     """
     cfg = _variant(tmp_path, **{"raw.velocity.params.z_max": 500.0})
     out = MaterialStage().build(cfg, tmp_path)
@@ -353,28 +365,32 @@ def test_R301_sv_profile_is_sea_level_referenced(tmp_path):
 
     i = int(np.argmin(np.abs(depth - 0.0)))
     assert depth[i] == pytest.approx(0.0)
-    # At sea level there is 500 m of rock ABOVE, so Sv_eff is already positive there.
-    assert sv[i] > 0.0
+    assert sv[i] == pytest.approx(0.0, abs=1e-9), (
+        f"Sv_eff(0) = {sv[i]:.6f} MPa, not 0 -- the above-sea-level overburden was not "
+        f"subtracted; every depth is offset by that amount")
 
     j = int(np.argmin(np.abs(depth - 10000.0)))
-    # ~ (rho - rho_w) g z with rho ~ 2700 plus the 500 m of extra overburden.
-    assert 150.0 < sv[j] < 185.0
+    assert 150.0 < sv[j] < 185.0        # ~ (rho - rho_w) g z with rho ~ 2700
 
 
-def test_R301_sea_level_reference_is_independent_of_the_grid_top(tmp_path):
-    """The SAME physical depth must give the same Sv whatever z_max is."""
+def test_R301_the_same_depth_gives_the_SAME_Sv_whatever_the_grid_top(tmp_path):
+    """Grid-top independence, as an EQUALITY.
+
+    Once the value is re-referenced, a taller grid cannot change Sv at a given depth at
+    all.  The previous version of this test only required the difference to be "bounded"
+    (< 15 MPa), which is precisely the loophole the 54.20 MPa offset lived in at other
+    depths -- a bound is not an invariant.
+    """
     a = MaterialStage().build(_variant(tmp_path, **{"raw.velocity.params.z_max": 0.0}),
                               tmp_path / "a")
     b = MaterialStage().build(_variant(tmp_path, **{"raw.velocity.params.z_max": 500.0}),
                               tmp_path / "b")
     da, db = np.load(a.sv_profile.path), np.load(b.sv_profile.path)
     for probe in (2000.0, 10000.0):
-        va = np.interp(probe, da["depth_m"], da["sv_eff_mpa"])
-        vb = np.interp(probe, db["depth_m"], db["sv_eff_mpa"])
-        # b carries 500 m more overburden, so it is HIGHER -- but by a bounded, physical
-        # amount, not by a wholesale shift of the depth axis.
-        assert vb > va
-        assert (vb - va) < 15.0, f"at {probe} m: {va:.2f} vs {vb:.2f} MPa"
+        va = float(np.interp(probe, da["depth_m"], da["sv_eff_mpa"]))
+        vb = float(np.interp(probe, db["depth_m"], db["sv_eff_mpa"]))
+        assert vb == pytest.approx(va, abs=1e-6), (
+            f"at {probe} m: {va:.6f} vs {vb:.6f} MPa -- Sv still depends on z_max")
 
 
 def test_R302_friction_grid_is_settable_independently(tmp_path):

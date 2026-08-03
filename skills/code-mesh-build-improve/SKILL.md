@@ -258,7 +258,7 @@ check, locality freeze `sol<0.98·h_max` (+`--free-coarse`: `sol>1.3·h_max`),
      always vertical. The pooled target set runs ~5× the gate set (1.42M vs 274k);
      that is the conservatism, and it is the right price.
    - **LEPP tie-break must be a STRICT TOTAL ORDER.** `E.argmax(1)` breaks ties by
-     local slot. Red-refined meshes (children *similar* to the parent) are full of
+     local slot. Red-refined meshes are full of
      EXACTLY equal edge lengths, so adjacent tets can each name the other's edge
      and the LEPP chain closes into a CYCLE — no terminal edge is ever found.
      Order ties by the globally unique edge key. This cut rim-freezing 16,536 → 566
@@ -339,7 +339,7 @@ Measured yield is small (ALT −366k = 2.5 %, PREF −2k): flag before spending.
 | coarsening pass breaks a Vs-based gate at basin edges (worst f collapses) | nearest-grid Vs flips nodes as >1 km cells' barycenters wander between remeshes | budget on `minimum_filter`-pooled Vs over the wander radius + 25 % contrast screen; coarsen→keep→repair, never all-or-nothing rollback |
 | an mmg regrade makes the gate WORSE (worst f drops), not better | mmg's ±41 % band licenses COARSENING of compliant cells | stop using mmg for this; switch to local LEB bisection (architecture 4) — it can only split |
 | REFINEMENT plateaus: count falls a few %/round while tets climb fast | target anchored to nearest-grid Vs at the BARYCENTER; bisected children flip across a CVM bin edge into slow Vs | target min-Vs over the cell's own VERTICAL extent (lower bound on any child) — architecture 4 |
-| LEB/LEPP finds few or no terminal edges; refinement barely moves | equal-length edge ties broken by LOCAL SLOT → chains cycle. Endemic on RED-refined meshes (children similar to parent) | break ties by the globally unique edge key (strict total order) |
+| LEB/LEPP finds few or no terminal edges; refinement barely moves | equal-length edge ties broken by LOCAL SLOT → chains cycle. Endemic on RED-refined meshes (red: TRIANGLE→4 similar children, TET→8 with only the 4 corners similar) | break ties by the globally unique edge key (strict total order) |
 | LEB stops with "all terminal edges frozen (rim …)" and a small residual | the k-hop working patch is too tight for the last chains | reseed a fresh patch on just the residual with large `--hops` and run a second pass |
 | a geometry pass swap-thrashes / OOMs the whole machine on a 10⁸-cell mesh | `P[T[:, EI]]` materialises an (n,6,3) float64 temporary — 17.6 GB at 122M tets | chunk every geometry pass (~2–4M tets/chunk); log peak RSS per round |
 
