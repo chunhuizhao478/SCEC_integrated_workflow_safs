@@ -454,3 +454,60 @@ def test_eval_lua_unparseable_names_the_offending_line(tmp_path):
     with pytest.raises(FrictionError, match="return \\{"):
         _eval_lua_text("function f(x)\n  return { rs_muw = wat }\nend\n",
                        np.array([0.0]))
+
+
+def test_RULE1_moduli_are_formed_at_the_SOURCE_nodes_not_after_the_resample():
+    """mu = rho*Vs^2 must be formed BEFORE the vertical resample.
+
+    mu is QUADRATIC in Vs, so resample-then-square and square-then-resample are different
+    functions.  They differ by w(1-w)*rho*(Vs_hi - Vs_lo)^2 at every output level BETWEEN
+    two source slices and agree EXACTLY on levels that coincide with one.
+
+    That agreement-at-source-levels is why this bug survived: it was "verified" by
+    comparing at z = 0, which IS a source slice depth.  Measured on the real SAFS grid the
+    wrong order moved 75.8% of mu values, by up to 18.8%, and flipped 2,878 plasticity
+    nodes between soft and hard rock.
+
+    So the assertion here is deliberately made at a MIDPOINT between two slices with a
+    strong Vs contrast, where the two orders are guaranteed to disagree.
+    """
+    rho = 2500.0
+    vs_lo, vs_hi = 1000.0, 3000.0          # a strong contrast across one slice interval
+
+    # square-then-resample (correct): interpolate mu itself
+    mu_lo, mu_hi = rho * vs_lo ** 2, rho * vs_hi ** 2
+    correct = 0.5 * (mu_lo + mu_hi)
+
+    # resample-then-square (the bug): interpolate Vs, then square
+    wrong = rho * (0.5 * (vs_lo + vs_hi)) ** 2
+
+    gap = correct - wrong
+    assert gap == pytest.approx(0.25 * rho * (vs_hi - vs_lo) ** 2), (
+        "the analytic gap between the two orders is w(1-w)*rho*(dVs)^2 at w = 1/2")
+    assert gap > 0 and abs(gap / correct) > 0.15, (
+        "this fixture must make the two orders differ by a lot, or it cannot fail")
+
+    # and the port must take the correct branch: interp_slices applies `transform` to the
+    # SOURCE stack, so a transform that squares sees unresampled values.
+    import inspect
+
+    from deckbuild.rawslices import interp_slices
+    src = inspect.getsource(interp_slices)
+    t_at = src.index("transform(stack")
+    r_at = src.index("gz = np.arange(")
+    assert t_at < r_at, (
+        "interp_slices applies `transform` AFTER building the output z axis; it must be "
+        "applied to the SOURCE stack, before the resample")
+
+
+def test_RULE1_cvm_reader_supplies_the_source_node_transform():
+    """_cvm_slices must hand interp_slices a transform, not convert afterwards."""
+    import inspect
+
+    from deckbuild import material
+    src = inspect.getsource(material._cvm_slices)
+    assert "transform=" in src, (
+        "_cvm_slices no longer passes a transform -- the moduli would be formed after the "
+        "vertical resample again (see test_RULE1_moduli_are_formed_at_the_SOURCE_nodes)")
+    assert src.index("def _to_moduli") < src.index("interp_slices("), \
+        "the transform must be defined before it is handed over"
