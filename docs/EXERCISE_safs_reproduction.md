@@ -11,10 +11,10 @@ Target: `safs_seisol_v4_0_0_RSSRW_ALT_THERMAL_CASE1_intermediate_plast_phi30_40_
 | E1 provenance | **PASS** | 37 CVM slices, 105 CTM slices, CSM csv present |
 | E2 descriptor | **PASS** | 37 fields recovered, **0 unknown** |
 | E2c freeze | **PASS** | measured on the FIELD: freeze OFF, agreeing with the filename |
-| E3 material | **PARTIAL** | grid reproduces **exactly**; values localised, not yet closed |
-| E4 stress | **PASS** | V2 1.7e-07, V4hull/V4a/V4b all pass |
-| E5 friction | **PASS** | G1–G4 pass; the emitted f_w Lua matches the shipped one to **0.000e+00** |
-| E6 deck | **PASS** | pre-flight **7/7 hard**, 0 warn, 0 skipped |
+| E3 material | **PARTIAL** | grid bit-exact; the port is bit-identical to the LEGACY code, so the value difference is the INPUT DATA |
+| E4 stress | **EXACT** | the shipped stress nc reproduced BIT-IDENTICALLY, all 6 components |
+| E5 friction | **PARTIAL** | `rs_a` bit-identical and the f_w Lua exact; `rs_srW` used a documented per-deck override |
+| E6 deck | **PASS** | pre-flight **7/7 hard**, 0 warn, 0 skipped; plasticity BIT-IDENTICAL |
 
 ## E2 — the descriptor is fully recoverable
 
@@ -34,76 +34,65 @@ emitted Lua:
 The f_w design read out of the Lua matches the shipped yaml's own filename value for
 value. The four grids are confirmed independent, as the exploration predicted.
 
-## E3 — the grid reproduces exactly; the value difference is now localised
+## Reproduction against the shipped v4_0_0 ALT deck — RESULTS
 
-```
-              built                shipped
-shape         452 x 361 x 194      452 x 361 x 194     IDENTICAL
-x / y / z     bit-identical
-Vs range      155 - 5352 m/s       155 - 5352 m/s      (matches the deck's own note)
+Target deck: `~/Downloads/seisol_quakeworx/safs_seisol_v4_0_0_RSSRW_ALT_THERMAL_CASE1_
+intermediate_plast_phi30_40_gradedfw_k1p70_nwredM7p8_sefw0_attenuation_deep40km`.
 
-mu    max rel 1.98    median rel 2.2e-05    2.59 % of nodes differ by > 1 %
-rho   exactly equal on 97.53 % of nodes
-```
+| shipped file | result |
+|:--|:--|
+| `safs_stress_andersonian_k1.7.nc` | **BIT-IDENTICAL** — all 6 components + 3 axes, 3,892,131 nodes, 0 differing |
+| `safs_plasticity_phi30_40.nc` | **BIT-IDENTICAL** — `plastCo` and `bulkFriction`, 31,655,368 nodes, 0 differing |
+| `safs_fault_rs_muw_*.yaml` | **EXACT** — same function, max abs diff 0.000e+00 over s in [-50, 500] km |
+| `safs_friction_thermal_case1.nc` | `rs_a` **BIT-IDENTICAL** (5,459,354 nodes); `rs_srW` differs — see below |
+| `safs_material_cvm.nc` | grid bit-exact; values differ — **cause proven, not our code** |
 
-**Still not reproduction — but no longer unexplained.** Binning the relative error by
-z-level splits it into two effects with completely different signatures.
+Stress and plasticity are built from the SHIPPED material nc, which isolates them from the
+CVM input difference below.
 
-### Effect 1 — a fixed ~2.5 % interior stripe, present at every depth
+### The CVM difference is the INPUT DATA, not the port
 
-At a level that coincides with a source slice depth the median error is **exactly zero**,
-yet 2.48 % of nodes still differ. Those nodes are **not** at the grid edge (median
-distance to the nearest edge is 87 cells against 58 for the grid as a whole); they are
-confined to a north–south band, x index 249–382 of 451, spanning almost the whole y range.
+Two hypotheses recorded here earlier were **both wrong**, and the tests that killed them:
 
-That is the signature of a **degenerate Delaunay triangulation**. Where the raw CVM is
-sampled on a regular lattice, every group of four co-circular points can be split along
-either diagonal; Qhull's choice is arbitrary and version-dependent, and the two linear
-interpolants disagree *inside* those squares while agreeing *exactly at* the sample
-points. That is precisely what is observed, and it also explains why the disagreement is
-geographically confined — to the sub-region where the raw sampling is regular.
+- ~~degenerate Delaunay triangulation~~ — **disproved**. Reversing the point order changes
+  0 of 163,172 nodes, and the order-sensitive set does not overlap the differing set at
+  all. The source is a complete 124 x 82 lattice and the CSV is already in the legacy's
+  `meshgrid(..., indexing="ij")` order, so both sides build the *same* triangulation.
+- ~~scipy / Qhull version~~ — **disproved** by the same test and by the one below.
 
-This effect is small (median 6.4e-04 in rho on the differing set) and is the "scipy/Qhull
-version" candidate, now supported by evidence rather than assumed.
+What settles it: running the **legacy's own** `build_utm_grid` and `resample_to_utm`
+(`toolbox/generate_velocity_nc_from_raw/generate_velocity_nc_from_raw.py`, the converter
+named in the shipped nc's own attributes) on our staged CSVs reproduces **the same 4,054
+differing nodes and the same max abs diff of 198.9** that our port produces. And comparing
+our port against that legacy function directly gives **bit-identical float64 output, 0 of
+163,172 nodes differing**.
 
-### Effect 2 — one anomalous level at z = -250 m
+So the port reproduces the legacy algorithm exactly. The staged CSVs are simply not the
+files that built the shipped nc, despite identical filenames — those names are opaque IDs
+(`CVM_1782322764534_h_data.csv`) and the shipped nc records a Google Drive `source_raw_dir`
+while ours are local. The differing nodes are all low-density basin material,
+1295-1944 kg/m^3, which is where a CVM revision would show and where the field has enough
+curvature for a small input change to exceed float32.
 
-| z (m) | median rel | nodes > 1 % |
-|--:|--:|--:|
-| -1000, -750, -500 | 0.000e+00 | ~1,200 |
-| **-250** | **1.32e-02** | **116,116 of 163,172 (71 %)** |
-| 0 | 0.000e+00 | 3,177 |
+**Consequence:** an exact CVM reproduction needs the original slice files, not a code fix.
 
-The CVM slice depths are 0, 100, 200, 300, 400, 500, 750, 1000, 1250, 1500, 2500, … so on
-a dz = 250 m output axis every level **is** a slice depth *except* z = -250, which falls
-between the 200 m and 300 m slices. It is the only shallow level that is genuinely
-interpolated in the vertical, and it is the only one that moves. The same pattern repeats
-at depth: -1750/-2000/-2250 sit inside the 1500→2500 gap and are the next-worst levels,
-while -2500 (a slice) returns to a zero median.
+### `rs_srW`: the shipped file used a documented OVERRIDE
 
-So Effect 2 is entirely in the **vertical resample between non-grid-aligned slices**. The
-legacy order of operations was checked and matches ours — `velocities_to_moduli` at the
-source nodes, then `resample_z` on the moduli, not the other way round — so the remaining
-suspects are the bracketing itself and the depth→elevation sign handling at the shallow
-slices. This is the concrete next step, and it is a small one.
+`rs_a` is bit-identical, which proves the thermal field and `a(T)` match exactly. `V_w(T)`
+is also identical between the two implementations — same constants (0.05, 1000, 350, 400),
+same clip, same linear ramp.
 
-### Ruled out
+The shipped nc says so itself: `profile = custom callables`, title
+`"RSSRW friction (case1 + custom profile)"`. The legacy `pipeline.build_friction_nc`
+(`pipeline.py:456`) takes `vw_fn`, `vw_patches` and `vw_ceiling=VW_CEILING_DEFAULT = 100.0`
+m/s (`pipeline.py:421`). That ceiling is exactly what the comparison shows: at the
+1,408,707 differing nodes ours is a flat 0.05 (T <= 350 degC) while the shipped ranges
+0.05015 to **100** — a V_w that rises below 350 degC and is capped at 100, not the standard
+profile.
 
-- **`extend_z_top` / the cap.** The 14 levels above z = 0 are exact copies of the z = 0
-  level in *both* files, so they contribute nothing of their own; their max of 1.98 is
-  inherited from z = 0. (Getting here did require fixing the cap — see below.)
-- **The grid construction.** All three axes are bit-identical.
-
-Building the inscribed grid took two real fixes to get this far:
-
-1. Sizing the grid from slice 0 alone put 7,624 of 181,541 nodes outside a later slice's
-   hull. The grid must be inscribed across **all** slices.
-2. More fundamentally, a lon/lat **rectangle** is a **curved quadrilateral** once
-   projected, so a bbox-inscribed rectangle still pokes past the curved edges. Inscribing
-   against the *edges* (largest western x, smallest eastern x, and likewise in y) is what
-   reproduces the shipped 452 × 361 exactly.
-
-Until Effect 2 is closed the workflow **does not claim to reproduce a SAFS deck**.
+That is a per-deck design override, not a defect in the general workflow. Reproducing it
+requires the specific `vw_fn`/patch list that deck was built with, which is not recorded in
+the nc. `FrictionStage.build` would need a `vw_fn=` hook to accept one.
 
 ## Three defects the end-to-end run found (2026-08-02)
 
