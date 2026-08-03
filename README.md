@@ -131,6 +131,20 @@ Built from scratch and tested on macOS (darwin, arm64) on 2026-08-02:
 | matplotlib | 3.10 |
 | pytest | 9.x — 312 passed |
 
+A clean run prints `312 passed` with **no warnings**. If you see
+
+```
+RuntimeWarning: numpy.ndarray size changed, may indicate binary incompatibility
+```
+
+you are on an older `pytest.ini`; `git pull`. The cause: every current conda-forge
+`netCDF4` is compiled against numpy 2 headers (they declare `numpy >=1.23,<3`), while this
+environment pins numpy 1.26 to keep scipy's Delaunay fixed. Importing the extension under
+numpy 1.x warns. It is suppressed *only* because the data path was verified sound — axes
+and every compound `float32` member survive a write/read round trip bit-identically
+through this exact build — and the filter is matched on both message and module, so a
+genuine ABI break elsewhere still fails loudly.
+
 Two pins are deliberate and should not be relaxed casually:
 
 - **`scipy=1.11.*`** — `scipy.spatial.Delaunay` decides the CVM interpolation, and a
