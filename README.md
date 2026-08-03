@@ -65,8 +65,20 @@ pytest -q                               # expect: 312 passed
 jupyter lab deck_workflow.ipynb
 ```
 
-Launched this way, the notebook's built-in `python3` kernel **is** the `deckbuild`
-environment, and there is nothing to register. This is the simplest path — prefer it.
+**This is the recommended way to run the workflow.** Launching JupyterLab from the
+activated environment makes the notebook's built-in `python3` kernel *be* that
+environment. Nothing is registered, so nothing can go stale, and — the part that actually
+matters — `pytest`, `run_workflow.py` and the notebook all run on the **same interpreter**.
+A green `pytest -q` therefore proves the notebook will work. Every other arrangement
+decouples the two, and the notebook can fail in ways the test run cannot see.
+
+If you never need the narrative, skip notebooks entirely — the same seven-stage chain runs
+headless and is the right choice for batch jobs, HPC and CI:
+
+```bash
+conda activate deckbuild
+python run_workflow.py --project <name>
+```
 
 ### If you run JupyterLab from somewhere else
 
