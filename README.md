@@ -61,25 +61,41 @@ cd SCEC_integrated_workflow_safs
 
 mamba env create -f environment.yml     # or: conda env create -f environment.yml
 conda activate deckbuild
-
-# register this env as a Jupyter kernel -- REQUIRED, see below
-python -m ipykernel install --user --name deckbuild --display-name "deckbuild"
-
 pytest -q                               # expect: 312 passed
-```
-
-Then open the notebook and **select the kernel**:
-
-```bash
 jupyter lab deck_workflow.ipynb
 ```
 
-> **Kernel → Change kernel → deckbuild.**
+Launched this way, the notebook's built-in `python3` kernel **is** the `deckbuild`
+environment, and there is nothing to register. This is the simplest path — prefer it.
+
+### If you run JupyterLab from somewhere else
+
+Running a central JupyterLab (a base env, a JupyterHub, VS Code) means its `python3`
+kernel is *that* environment, not this one. Register `deckbuild` as a named kernel once:
+
+```bash
+conda activate deckbuild
+python -m ipykernel install --user --name deckbuild --display-name "deckbuild"
+```
+
+then in the notebook choose **Kernel → Change kernel → deckbuild**. In VS Code, click the
+kernel picker at the top right and select the `deckbuild` interpreter.
+
+> **A kernel's display name tells you nothing about which interpreter it runs.** A kernel
+> named after an environment can point somewhere else entirely — the authoritative answer
+> is the `argv[0]` in its `kernel.json`. When a notebook reports missing packages you are
+> certain are installed, check the kernel before reinstalling anything:
 >
-> Do not skip this. Creating the environment is not enough: JupyterLab only offers kernels
-> that have been *registered*, and if you launch it from a different environment the
-> notebook silently runs against that environment's packages instead — which looks exactly
-> like "missing packages" no matter how many times you reinstall.
+> ```bash
+> jupyter kernelspec list                       # names and their directories
+> cat <that directory>/kernel.json              # argv[0] is the real interpreter
+> ```
+>
+> Or, from inside a running notebook, ask the kernel itself:
+>
+> ```python
+> import sys; print(sys.executable)
+> ```
 
 Prefer to stay in the terminal? The same chain runs headless, no kernel needed:
 
@@ -117,8 +133,9 @@ Two pins are deliberate and should not be relaxed casually:
 
 | symptom | cause | fix |
 |:--|:--|:--|
-| `ModuleNotFoundError` for `netCDF4`, `pyproj`, `yaml`, … in the notebook | the notebook is on a different kernel | Kernel → Change kernel → **deckbuild** |
-| `deckbuild` is not offered as a kernel | `ipykernel install` was never run | re-run the register step above |
+| `ModuleNotFoundError` for `yaml`, `netCDF4`, `pyproj`, … in the notebook | the kernel is a different interpreter from the env you installed into | run `import sys; print(sys.executable)` in a cell — if it is not `.../envs/deckbuild/bin/python`, switch kernels |
+| the kernel *named* after your environment still fails | its `kernel.json` points somewhere else — a stale registration can silently target the **system** Python | `jupyter kernelspec list`, then check `argv[0]` in that `kernel.json`; re-register with `ipykernel install` |
+| `deckbuild` is not offered as a kernel | `ipykernel install` was never run, or you launched Jupyter from another env | run the register step above, or `conda activate deckbuild` before `jupyter lab` |
 | `ImportError: cannot import name 'backend2gui'` | `matplotlib` 3.8 with IPython ≥ 9.16 | you are on an old `environment.yml`; `git pull` and rebuild |
 | a stage cannot find its raw inputs | descriptor paths are relative to `data/<project>/` | check `Project.load(..., require_files=True)` output — it names the missing file |
 
