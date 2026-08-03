@@ -33,7 +33,7 @@ import numpy as np
 
 from deckbuild.geometry import fault_trace           # depth-aware; do not reimplement
 
-__all__ = ["plot_material_slices", "plot_plasticity_slices", "plot_material_profiles",
+__all__ = ["plot_fw_and_kappa", "plot_material_slices", "plot_plasticity_slices", "plot_material_profiles",
            "plot_onfault", "onfault_report", "vs_from_material"]
 
 HYPO_KW = dict(marker="*", ms=14, mfc="lime", mec="k", mew=.8, ls="none", zorder=6)
@@ -597,3 +597,135 @@ def onfault_report(fault, cfg, sigma_n, tau, mu_app, *, f0=None, fw=None,
         L.append(f"  no pre-slip requires max mu_app < f0: {np.nanmax(mu):.4f} < {f0:g} "
                  f" ->  {'OK' if ok else 'VIOLATED'}")
     return "\n".join(L)
+
+
+# --------------------------------------------------------------- the design read-out
+def _band_profile(s, v, mask, sbin_km, min_per_bin=5):
+    """(centres, median, p10, p90) of `v` binned along strike over `mask`."""
+    edges = np.arange(np.floor(np.nanmin(s)), np.ceil(np.nanmax(s)) + sbin_km, sbin_km)
+    med = np.full(len(edges) - 1, np.nan)
+    lo = np.full_like(med, np.nan)
+    hi = np.full_like(med, np.nan)
+    for i in range(len(edges) - 1):
+        sel = mask & (s >= edges[i]) & (s < edges[i + 1])
+        if int(sel.sum()) >= min_per_bin:
+            med[i], lo[i], hi[i] = np.nanpercentile(v[sel], [50, 10, 90])
+    return 0.5 * (edges[:-1] + edges[1:]), med, lo, hi
+
+
+def plot_fw_and_kappa(fault, cfg, fw_design, *, mu_app, sigma_n_mpa, fw_on_fault,
+                      tau_mpa=None, snap=None, f0=None, a_minus_b=None, figsize=(14, 13)):
+    """The whole design on ONE along-strike axis, in causal order.
+
+      (a) f_w(s)                      -- THE LEVER you set
+      (b) sigma_n and tau_0           -- the stress it acts on (unchanged by f_w)
+      (c) mu_app vs f_w               -- the MARGIN between them; the shaded gap IS the
+                                         dynamic stress drop, in friction units
+      (d) corridor kappa              -- what the lever costs
+
+    They belong together because kappa ~ (mu_app - f_w)^2 / (f0 - f_w): a step in (a) that
+    looks modest closes the gap in (c) and cuts (d) as roughly the SQUARE of the drop.
+    Reading f_w alone hides that, which is why the legacy never plots one without the rest.
+
+    Every panel is a binned median over the seismogenic band with a 10-90 percentile band,
+    so a single ugly facet cannot move a curve.
+
+    kappa_c is NECESSARY, NOT SUFFICIENT -- a design that cleared it still arrested at
+    s ~ 60 km on the cluster.  Only the run decides.
+    """
+    import matplotlib.pyplot as plt
+
+    from deckbuild.friction import fw_profile_1d, kappa_profile
+
+    ph = cfg.physics
+    sb = float(ph.kappa_sbin_km)
+    s = fault.s_km(cfg.strike)
+    d = fault.depth_m / 1000.0
+    lo_km, hi_km = ph.seis_band_km
+    band = (d >= lo_km) & (d <= hi_km) & np.isfinite(mu_app) & (np.asarray(sigma_n_mpa) > 0)
+    if a_minus_b is not None:
+        band &= np.asarray(a_minus_b) < 0.0
+    s_lim = (float(s.min()) - 8.0, float(s.max()) + 8.0)
+
+    fig, ax = plt.subplots(4, 1, figsize=figsize, sharex=True,
+                           gridspec_kw=dict(height_ratios=[1.0, 1.15, 1.15, 1.3]))
+
+    # (a) the lever
+    ss = np.linspace(s_lim[0], s_lim[1], 1600)
+    ax[0].plot(ss, fw_profile_1d(ss, fw_design), lw=2, color="tab:blue", label="$f_w(s)$")
+    ax[0].set_ylabel("$f_w$")
+    ax[0].set_title("(a) the graded strong-rate-weakening floor $f_w(s)$ -- THE LEVER",
+                    fontsize=10)
+
+    # (b) the stress it acts on
+    c, m_sn, l_sn, h_sn = _band_profile(s, np.asarray(sigma_n_mpa, float), band, sb)
+    ax[1].plot(c, m_sn, lw=1.8, color="tab:purple", label=r"$\sigma_n$ median")
+    ax[1].fill_between(c, l_sn, h_sn, alpha=.22, color="tab:purple", label="10-90%")
+    if tau_mpa is not None:
+        _, m_t, l_t, h_t = _band_profile(s, np.asarray(tau_mpa, float), band, sb)
+        ax[1].plot(c, m_t, lw=1.8, color="tab:green", label=r"$\tau_0$ median")
+        ax[1].fill_between(c, l_t, h_t, alpha=.22, color="tab:green")
+    ax[1].set_ylabel("stress (MPa)")
+    ax[1].set_title(rf"(b) the on-fault stress over {lo_km:g}-{hi_km:g} km -- what the "
+                    rf"design acts on.  $f_w$ does NOT change this", fontsize=10)
+
+    # (c) the margin
+    _, m_mu, l_mu, h_mu = _band_profile(s, np.asarray(mu_app, float), band, sb)
+    _, m_fw, _, _ = _band_profile(s, np.asarray(fw_on_fault, float), band, sb)
+    ax[2].plot(c, m_mu, lw=1.8, color="tab:orange", label=r"$\mu_{app}$ median")
+    ax[2].fill_between(c, l_mu, h_mu, alpha=.22, color="tab:orange", label="10-90%")
+    ax[2].plot(c, m_fw, lw=1.8, color="tab:blue", label="$f_w$")
+    ax[2].fill_between(c, m_fw, m_mu, where=np.isfinite(m_mu) & np.isfinite(m_fw),
+                       alpha=.28, color="tab:red",
+                       label=r"the gap = $\Delta\tau_{dyn}/\sigma_n$")
+    ax[2].set_ylabel("friction")
+    ax[2].set_title(r"(c) apparent friction against the floor -- the SHADED GAP is what "
+                    r"the rupture pays out", fontsize=10)
+
+    # (d) the cost
+    sc, med, coast = kappa_profile(fault, cfg, mu_app, sigma_n_mpa, fw_on_fault,
+                                   f0=f0, a_minus_b=a_minus_b)
+    ax[3].plot(sc, med, lw=1.0, color="0.6", label=rf"$\kappa$, {sb:g} km bins")
+    ax[3].plot(sc, coast, lw=2.2, color="tab:red",
+               label=rf"coasting $\kappa$ ({ph.l_coast_km:g} km mean) -- what the gate reads")
+    kc = float(ph.kappa_c)
+    ax[3].axhline(kc, color="k", ls="--", lw=1.2, label=rf"$\kappa_c$ = {kc:g}")
+    ax[3].axhline(1.0, color="0.3", ls=":", lw=1.0, label=r"$\kappa$ = 1 break-even")
+    if np.isfinite(coast).any():
+        i = int(np.nanargmin(coast))
+        ax[3].plot([sc[i]], [coast[i]], "v", ms=9, mfc="crimson", mec="k", zorder=6)
+        ax[3].annotate(rf"min coasting $\kappa$ = {coast[i]:.3f} at s = {sc[i]:.0f} km",
+                       xy=(sc[i], coast[i]), xytext=(6, 14), textcoords="offset points",
+                       fontsize=8, color="crimson")
+    ax[3].set_yscale("log")
+    ax[3].set_ylabel(r"corridor $\kappa$")
+    ax[3].set_xlabel("along-strike s (km)")
+    ax[3].set_title(rf"(d) corridor $\kappa$ -- WHAT THE LEVER COSTS.  "
+                    rf"$\kappa \sim (\mu_{{app}} - f_w)^2/(f_0 - f_w)$, so it falls as "
+                    rf"the SQUARE of the drop", fontsize=10)
+
+    # Per-panel legend placement: a legend that covers the curve it describes is worse
+    # than no legend.  (d) rises to the top-left, so its box goes bottom-right.
+    locs = ["upper left", "upper left", "upper right", "lower right"]
+    for i, a_ in enumerate(ax):
+        _mark_bands(a_, cfg, label_first=(i == 0))
+        _mark_boundaries(a_, fw_design)
+        if snap is not None:
+            a_.axvline(snap.s_km, color="crimson", ls="--", lw=1.2,
+                       label="hypocentre" if i == 0 else None)
+        a_.set_xlim(s_lim)
+        a_.grid(alpha=.3)
+        a_.legend(fontsize=8, loc=locs[i], ncol=2, framealpha=.9)
+    # headroom so the kappa curve never runs under its own title or legend
+    fin = coast[np.isfinite(coast)]
+    if fin.size:
+        ax[3].set_ylim(min(0.5 * float(np.nanmin(med[np.isfinite(med)])), 0.6 * kc),
+                       4.0 * float(fin.max()))
+
+    top = _suptitle(fig, "GRADED $f_w$ DESIGN READ-OUT -- lever, stress, margin, cost.  "
+                         "kappa is NECESSARY, NOT SUFFICIENT: a design that cleared this "
+                         "screen still arrested on the cluster", figsize)
+    fig.tight_layout(rect=(0, 0, 1, top))
+    return fig
+
+

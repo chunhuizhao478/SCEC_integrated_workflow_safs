@@ -175,6 +175,14 @@ class PhysicsDefaults:
     w_energy_m: float = 10.0e3
     dc_m: float = 1.2
     kappa_c: float = 0.9
+    # --- the corridor-kappa constants (legacy pipeline.py:183-189) ------------------
+    # kappa uses a FIXED reference shear modulus, deliberately NOT the local mu: the
+    # screen is meant to be stress-driven, so a soft basin must not flatter its own
+    # kappa.  It is therefore a DIFFERENT quantity from mu_shear_pa above.
+    g_shear_kappa_pa: float = 30.0e9        # legacy G_SHEAR_KAPPA
+    l_weak_factor: float = 5.0              # legacy L_WEAK_FACTOR: L_weak = factor * Dc
+    kappa_sbin_km: float = 2.0              # legacy SBIN_KM, along-strike corridor bin
+    # NOTE: kappa's Dc is rs_sl0 (legacy RS_DC_DEFAULT = 0.10), NOT dc_m above.
     seis_band_km: tuple[float, float] = (3.0, 12.0)
     active_band_km: tuple[float, float] = (0.3, 15.0)
     l_coast_km: float = 6.0

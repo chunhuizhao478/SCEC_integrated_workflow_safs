@@ -37,7 +37,8 @@ from deckbuild.config import Project
 from deckbuild.contract import Artifact, GateReport, HARD, Stage, WARN
 from deckbuild.geometry import build_grid, load_fault, strike_s_km
 
-__all__ = ["FrictionStage", "FwDesign", "FrictionError", "FRICTION_FIELDS",
+__all__ = [
+    "kappa_per_facet", "kappa_profile","FrictionStage", "FwDesign", "FrictionError", "FRICTION_FIELDS",
            "a_minus_b", "a_of_T", "vw_of_T", "fw_profile_1d", "write_lua_map",
            "nucleation_lua", "check_seissol_supports_spatial_muw", "unit_self_test"]
 
@@ -470,3 +471,64 @@ class FrictionStage(Stage):
         rep.add("FLframe", ox in text,
                 f"the emitted Lua uses the descriptor's strike origin ({ox})")
         return rep
+
+
+# --------------------------------------------------------------------------- kappa
+def kappa_per_facet(mu_app, sigma_n_mpa, fw, cfg, f0=None):
+    """RSSRW corridor kappa, per facet.  VERBATIM from the legacy `_kappa`
+    (combined_workflow/pipeline.py:647).
+
+        dtau  = max((mu_app - f_w) * sigma_n, 0)
+        Gc    = 0.5 * (f0 - f_w) * sigma_n * (L_weak_factor * Dc)
+        kappa = dtau^2 * W / (2 * G_ref * Gc)
+
+    kappa ~ (mu_app - f_w)^2 / (f0 - f_w), so it falls roughly as the SQUARE of the drop:
+    raising f_w cuts it hard.  G_ref is a FIXED reference modulus, not the local mu, so a
+    soft basin cannot flatter its own kappa.  Dc here is rs_sl0, not physics.dc_m.
+
+    kappa is NECESSARY, NOT SUFFICIENT -- a design that cleared this screen still arrested
+    on the cluster.  Read it as "can this patch pay for its own fracture energy", nothing
+    stronger.
+    """
+    ph = cfg.physics
+    f0 = ph.rs_f0 if f0 is None and hasattr(ph, "rs_f0") else (0.6 if f0 is None else f0)
+    sn = np.asarray(sigma_n_mpa, float) * 1.0e6
+    fw = np.asarray(fw, float)
+    dtau = np.maximum((np.asarray(mu_app, float) - fw) * sn, 0.0)
+    gc = 0.5 * (f0 - fw) * sn * (ph.l_weak_factor * ph.rs_sl0)
+    return dtau ** 2 * ph.w_energy_m / (2.0 * ph.g_shear_kappa_pa * np.maximum(gc, 1.0))
+
+
+def kappa_profile(fault, cfg, mu_app, sigma_n_mpa, fw, *, f0=None, a_minus_b=None,
+                  min_per_bin=5):
+    """(s_centres, kappa_median, kappa_coasting) along strike over the seismogenic band.
+
+    Binned median per `kappa_sbin_km`, then a moving average over `l_coast_km` -- the
+    COASTING kappa, which is what the gate screen reads: a rupture crosses a short weak
+    patch on momentum, so a single bin dipping low does not stop it, and the legacy
+    therefore screens the running mean rather than the pointwise value.
+    Bins with fewer than `min_per_bin` facets are NaN rather than noisy.
+    """
+    ph = cfg.physics
+    s = fault.s_km(cfg.strike)
+    d = fault.depth_m / 1000.0
+    lo, hi = ph.seis_band_km
+    m = (d >= lo) & (d <= hi) & np.isfinite(mu_app) & (np.asarray(sigma_n_mpa) > 0)
+    if a_minus_b is not None:                 # the VW corridor, as the legacy screen does
+        m &= np.asarray(a_minus_b) < 0.0
+    kap = kappa_per_facet(mu_app, sigma_n_mpa, fw, cfg, f0=f0)
+
+    sb = float(ph.kappa_sbin_km)
+    edges = np.arange(np.floor(s.min()), np.ceil(s.max()) + sb, sb)
+    med = np.full(len(edges) - 1, np.nan)
+    for i in range(len(edges) - 1):
+        sel = m & (s >= edges[i]) & (s < edges[i + 1])
+        if int(sel.sum()) >= min_per_bin:
+            med[i] = float(np.median(kap[sel]))
+    nb = max(1, int(round(ph.l_coast_km / sb)))
+    coast = np.full_like(med, np.nan)
+    for i in range(len(med)):
+        seg = med[max(0, i - nb // 2):min(len(med), i + nb // 2 + 1)]
+        if np.isfinite(seg).any():
+            coast[i] = float(np.nanmean(seg))
+    return 0.5 * (edges[:-1] + edges[1:]), med, coast
