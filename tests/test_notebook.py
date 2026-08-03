@@ -155,3 +155,44 @@ def test_readme_retarget_checklist_covers_every_required_field():
                   "strike", "crs"):
         assert field in readme, f"retarget checklist missing {field}"
     assert "tectonic regime" in readme
+
+
+def test_safs_check_is_generated_from_deck_workflow_and_in_sync():
+    """The SAFS check must BE the general workflow, run on SAFS.
+
+    If the two notebooks are maintained by hand they drift, and a green check stops
+    meaning "the workflow reproduces a production deck" and starts meaning "a notebook
+    that resembles the workflow does" -- which is worth nothing.  `tools/make_safs_check.py`
+    copies every structural cell verbatim and edits only the PARAMETERS blocks; this test
+    fails the moment the file on disk stops matching that regeneration.
+    """
+    import subprocess
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "make_safs_check.py"),
+                        "--check"], capture_output=True, text=True)
+    assert r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+def test_the_two_notebooks_share_every_structural_cell():
+    """Cell for cell, up to the appended [C] section, the sources must be identical
+    apart from the PARAMETERS blocks."""
+    import json
+
+    def cells(p):
+        return json.loads((ROOT / p).read_text())["cells"]
+
+    a, b = cells("deck_workflow.ipynb"), cells("safs_check.ipynb")
+    # the appended SAFS-only block is its "## [C]" heading plus the STEP C* cells
+    shared = [c for c in b
+              if "STEP C" not in "".join(c["source"])
+              and not "".join(c["source"]).lstrip().startswith("## [C]")]
+    # the title cell is deliberately different; everything else lines up
+    assert len(shared) >= len(a) - 1
+    for i, (ca, cb) in enumerate(zip(a[1:], shared[1:]), start=1):
+        sa, sb = "".join(ca["source"]), "".join(cb["source"])
+        assert ca["cell_type"] == cb["cell_type"], f"cell {i} type differs"
+        if "---- PARAMETERS ----" in sa or "RUN_TAG" in sa:
+            continue                      # the only sanctioned divergence
+        assert sa == sb, (
+            f"cell {i} has drifted between the notebooks; regenerate with "
+            f"tools/make_safs_check.py\n--- deck_workflow ---\n{sa[:400]}\n"
+            f"--- safs_check ---\n{sb[:400]}")

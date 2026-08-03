@@ -1,39 +1,52 @@
-"""plots.py -- the figures that let you SEE whether a deck is right.
+"""plots.py -- the check figures, in the SAFS workflow house style.
 
-Two families, both driven by files that were already written to disk, never by in-memory
-state.  What you look at is therefore exactly what SeisSol will read.
+Every figure here is driven by a FILE already written to disk, never by in-memory state,
+so what you look at is exactly what SeisSol will read.
 
-    plot_material_slices()  horizontal Vs maps at chosen depths + a vertical section,
-                            with the REAL fault outline (from the mesh) drawn on every one
-    plot_onfault()          the on-fault maps in the fault's own (s, depth) frame
+    plot_material_slices()    2 x 3 horizontal depth slices of the velocity model
+    plot_plasticity_slices()  the same grid for phi and cohesion (opt-in physics)
+    plot_material_profiles()  slice statistics vs depth + Sv_eff(z) + the fault section
+    plot_onfault()            the (s, z) fault maps, lettered, with derived panels
+    onfault_report()          the per-region text diagnostics that go under it
 
-Design notes, learned from the legacy `graded_fw.plot_stress`:
+HOUSE STYLE -- taken from the legacy toolbox (`lib/graded_fw.py::plot_design` and
+`plot_stress`, and `plasticity_roten2014.ipynb`) so these figures sit alongside those
+without looking foreign:
 
-* colour limits come from PERCENTILES, not min/max.  One bad facet at a domain corner
-  otherwise flattens the whole field to a single colour -- the failure visible in the
-  before-figures this module replaces.
-* the fault is drawn from the MESH at the depth of the slice.  A fault is a 3-D surface,
-  so its map-view trace moves with depth; drawing the z=0 trace on a 10 km slice quietly
-  misplaces it by kilometres on a dipping or curved fault.
-* named gate bands and the hypocentre are annotated on every panel, because "is the
-  nucleation inside the band I think it is" is the question these plots exist to answer.
+  * on-fault panels plot **z (km), negative down** -- NOT an inverted positive-depth axis
+  * the hypocentre is a **lime star with a black edge**: `"*", ms=14, mfc="lime", mec="k"`
+  * every along-strike region boundary is `axvline(color="tab:red", ls="--", lw=1.0)`;
+    named gate bands are `axvspan(alpha=0.15, color="tab:orange")`
+  * depth slices are `imshow(origin="lower", extent=[km], aspect="equal",
+    interpolation="nearest")` with the **fault footprint** over them as `'.', ms=0.4,
+    color='0.35', alpha=0.5`
+  * each slice title carries a **statistic**, not just its depth
+  * one **shared** colorbar per slice grid: `fig.colorbar(im, ax=axes, shrink=0.7)`
+  * a **bold, wrapped** suptitle naming the design
+  * panels are lettered (a), (b), (c)... and titled with a sentence saying what to look for
+  * colour limits are PERCENTILES -- one bad facet at a domain corner otherwise flattens
+    the whole field to a single colour
 """
 from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["plot_material_slices", "plot_onfault", "vs_from_material"]
+from deckbuild.geometry import fault_trace           # depth-aware; do not reimplement
 
-# The depth-aware map trace already exists -- do not reimplement it here.
-from deckbuild.geometry import fault_trace           # noqa: E402
+__all__ = ["plot_material_slices", "plot_plasticity_slices", "plot_material_profiles",
+           "plot_onfault", "onfault_report", "vs_from_material"]
+
+HYPO_KW = dict(marker="*", ms=14, mfc="lime", mec="k", mew=.8, ls="none", zorder=6)
+BOUND_KW = dict(color="tab:red", ls="--", lw=1.0)
+BAND_KW = dict(alpha=0.15, color="tab:orange")
+FOOTPRINT_KW = dict(marker=".", ms=0.4, color="0.35", alpha=0.5, ls="none", zorder=3)
+DEFAULT_SLICES_M = (0.0, -1000.0, -3000.0, -5000.0, -10000.0, -15000.0)
 
 
 # --------------------------------------------------------------------------- helpers
-
-
 def vs_from_material(material_nc, fields=("mu", "rho")):
-    """(x, y, z, Vs) from a material nc.  Vs = sqrt(mu/rho), the quantity that sets the
-    resolvable frequency and the one worth looking at."""
+    """(x, y, z, Vs) from a material nc.  Vs = sqrt(mu/rho) -- the quantity that sets the
+    resolvable frequency, and the one worth looking at."""
     from deckbuild.asagi import read_asagi
     x, y, z, f, _ = read_asagi(material_nc, fields=list(fields))
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -42,7 +55,7 @@ def vs_from_material(material_nc, fields=("mu", "rho")):
 
 
 def _clim(v, lo=2.0, hi=98.0):
-    """Percentile colour limits.  Guards the degenerate all-equal case."""
+    """Percentile colour limits, guarding the degenerate all-equal case."""
     v = np.asarray(v)
     good = np.isfinite(v)
     if not good.any():
@@ -63,231 +76,398 @@ def _is_effectively_constant(v, rtol=1e-6):
     return bool(m > 0 and (np.nanmax(v[good]) - np.nanmin(v[good])) / m < rtol)
 
 
+def _wrap_title(txt, fig_w_in, fontsize, min_chars=60):
+    """Hard-wrap a long suptitle to the FIGURE width.  Returns (text, n_lines).
+
+    Ported from the legacy toolbox because the failure mode is non-obvious: Jupyter's
+    inline backend saves with `bbox_inches="tight"`, so a suptitle that overhangs the
+    canvas EXPANDS the exported bitmap sideways and the panels end up as a thin strip down
+    the middle of a very wide PNG -- the "why is this plot so small" report.
+    """
+    per_char = fontsize * 0.60 / 72.0
+    budget = max(int(min_chars), int(float(fig_w_in) / per_char))
+    lines, cur = [], ""
+    for w in str(txt).split(" "):
+        trial = f"{cur} {w}".strip()
+        if len(trial) > budget and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines), len(lines)
+
+
+def _suptitle(fig, txt, figsize, fontsize=12):
+    wrapped, n = _wrap_title(txt, figsize[0], fontsize)
+    st = fig.suptitle(wrapped, fontsize=fontsize, fontweight="bold")
+    st.set_wrap(True)
+    return 1.0 - (n * fontsize * 1.45 / (figsize[1] * 72.0)) - 0.004
+
+
+def _marker_area(ax, n, fill=0.55, lo=3.0, hi=600.0):
+    """Scatter marker area (points^2) that TILES the axes for this many points.
+
+    The legacy `s=3` is right for a 160,280-facet production fault and turns a 192-facet
+    demo into a field of specks with white between them -- which reads as a broken plot,
+    not as a coarse mesh.  Area per point is (axes area / n), scaled by `fill`.
+    """
+    fig = ax.get_figure()
+    bb = ax.get_window_extent(renderer=fig.canvas.get_renderer()) \
+        if fig.canvas.get_renderer is not None else None
+    try:
+        w_pt = bb.width * 72.0 / fig.dpi
+        h_pt = bb.height * 72.0 / fig.dpi
+    except Exception:                                   # no renderer yet -- estimate
+        w_pt, h_pt = fig.get_size_inches()[0] * 72.0, fig.get_size_inches()[1] * 72.0 / 4
+    return float(np.clip(fill * w_pt * h_pt / max(int(n), 1), lo, hi))
+
+
 def _nearest_k(z, target_z):
     return int(np.argmin(np.abs(np.asarray(z) - target_z)))
+
+
+def _depth_tol_km(fault, floor_km=0.5):
+    """A depth window wide enough to catch facets on THIS mesh.
+
+    A fixed 0.5 km is right for a 160k-facet production fault and catches nothing at all
+    on a 192-facet demo -- which then reports "fault does not reach 5 km" for a fault that
+    plainly does.
+    """
+    d = np.sort(np.unique(np.round(fault.depth_m / 1000.0, 3)))
+    if len(d) < 2:
+        return floor_km
+    return float(max(floor_km, np.median(np.diff(d))))
 
 
 def _section_nbin(fault, cfg, cap=240, floor=8):
     """How many along-strike bins the section can actually fill.
 
     Must follow the number of DISTINCT along-strike positions, not the facet count: the
-    demo fault has 192 facets but only 16 columns, so a facet-count rule (192//8 = 24)
-    asks for more bins than there are columns and leaves a third of them empty -- visible
-    as white stripes through the section.
+    demo fault has 192 facets in only 16 columns, so a facet-count rule asks for more bins
+    than there are columns and leaves a third of them empty -- white stripes.
     """
     if cfg is None or getattr(cfg, "strike", None) is None:
         return cap
     s = fault.s_km(cfg.strike)
-    n_col = int(np.unique(np.round(s, 1)).size)      # distinct s to the nearest 100 m
-    return int(np.clip(n_col, floor, cap))
+    n_col = int(np.unique(np.round(s, 1)).size)
+    # 3x the distinct columns: nearest-column sampling fills between them, so oversampling
+    # only smooths, while undersampling throws real along-strike structure away.
+    return int(np.clip(3 * n_col, floor, cap))
 
 
-def _depth_tol_km(fault, floor_km=0.5):
-    """A depth window wide enough to catch facets on THIS mesh.
-
-    Half the median spacing of the facet depths, floored.  On a fine mesh this collapses
-    to the floor; on a coarse one it opens up enough that a slice still finds the fault.
-    """
-    d = np.sort(np.unique(np.round(fault.depth_m / 1000.0, 3)))
-    if len(d) < 2:
-        return floor_km
-    return float(max(floor_km, 0.5 * np.median(np.diff(d)) * 2.0))
-
-
-def _annotate_bands(ax, cfg, ymax=None, label=True):
-    """Shade the named gate bands along s and name them.
-
-    The label is placed in AXES coordinates near the top, not at a data y -- a data-space
-    y has to be recomputed per panel and lands outside the view (invisible) the moment a
-    panel's y-limits differ.
-    """
+def _mark_bands(ax, cfg, label_first=True):
+    """Shade named gate bands, one legend entry."""
     if cfg is None or not getattr(cfg, "gate_bands", None):
         return
-    for b in cfg.gate_bands:
-        ax.axvspan(b.s_start_km, b.s_end_km, alpha=0.16, color="tab:orange", zorder=0)
-        if label:
-            ax.text(0.5 * (b.s_start_km + b.s_end_km), 0.94, b.name,
-                    transform=ax.get_xaxis_transform(), ha="center", va="top",
-                    fontsize=7.5, color="saddlebrown", zorder=7,
-                    bbox=dict(fc="white", ec="none", alpha=.6, pad=1.2))
+    for i, b in enumerate(cfg.gate_bands):
+        ax.axvspan(b.s_start_km, b.s_end_km,
+                   label=f"{b.name} gate" if (i == 0 and label_first) else None, **BAND_KW)
 
 
-# ------------------------------------------------------------------ material figure
-def plot_material_slices(material_nc, fault=None, *, depths_km=(0.0, 5.0, 10.0),
-                         cfg=None, sv_profile=None, tol_km=None, cmap="viridis",
-                         nbin=None, zlim_km=None, figsize=None):
-    """Horizontal Vs slices at `depths_km` + a FAULT-FOLLOWING vertical section.
+def _design_bounds(fw_design):
+    if fw_design is None:
+        return []
+    b = getattr(fw_design, "boundaries_s_km", None)
+    return [tuple(w) for w in b] if b else []
 
-    The section is cut along the fault's own curved trace, not a straight chord, and its
-    x-axis is the same along-strike `s` the on-fault figures use -- so the two read
-    together: a low-Vs column here lines up with the facets it weakens there.
 
-    A straight chord would be wrong on a curved fault.  It wanders off the trace, so the
-    facets it captures form disconnected wedges rather than the continuous fault surface,
-    which reads as a hole in the fault that is not there.
+def _mark_boundaries(ax, fw_design):
+    """A tab:red dashed line at EVERY f_w transition edge."""
+    for w0, w1 in _design_bounds(fw_design):
+        for b in (w0, w1):
+            ax.axvline(b, **BOUND_KW)
 
-    Parameters
-    ----------
-    material_nc : path to the material nc (the file, not an in-memory field)
-    fault       : a `geometry.Fault`, or None to omit the fault entirely
-    depths_km   : the horizontal slices to cut, positive-down
-    cfg         : the project descriptor -- supplies the strike frame and band names
-    sv_profile  : optional .npz from MaterialStage; adds the Sv_eff(z) panel
 
-    Every panel is a check you can fail by eye: a fault curve running off the coloured
-    region means the grid does not cover the fault there -- what M3/V4hull test
-    numerically.
+# ------------------------------------------------------ horizontal slices (2 x 3 grid)
+def _slice_grid(x, y, z, vol, *, depths_m, fault, title_stat, cb_label, suptitle,
+                cmap="viridis", norm=None, vmin=None, vmax=None, contour=None,
+                contour_levels=(), figsize=(16.5, 9), tol_km=None):
+    """The legacy 2 x 3 imshow slice grid: one shared colorbar, a statistic per title, the
+    fault footprint over every panel."""
+    import matplotlib.pyplot as plt
+
+    depths_m = list(depths_m)
+    nrow = 2 if len(depths_m) > 3 else 1
+    ncol = int(np.ceil(len(depths_m) / nrow))
+    fig, axes = plt.subplots(nrow, ncol, figsize=figsize, constrained_layout=True,
+                             squeeze=False)
+    ext = [x[0] / 1e3, x[-1] / 1e3, y[0] / 1e3, y[-1] / 1e3]
+    if fault is not None and tol_km is None:
+        tol_km = _depth_tol_km(fault)
+
+    im = None
+    for ax, zm in zip(axes.ravel(), depths_m):
+        k = _nearest_k(z, zm)
+        kw = dict(cmap=cmap)
+        if norm is None:
+            kw.update(vmin=vmin, vmax=vmax)
+        else:
+            kw.update(norm=norm)
+        im = ax.imshow(vol[k], origin="lower", extent=ext, interpolation="nearest",
+                       aspect="equal", **kw)
+        if (contour is not None and len(contour_levels)
+                and not _is_effectively_constant(contour[k])):
+            ax.contour(x / 1e3, y / 1e3, contour[k], levels=list(contour_levels),
+                       colors="w", linewidths=0.7)
+        if fault is not None:
+            fx, fy = fault_trace(fault, depth_km=-z[k] / 1e3, tol_km=tol_km)
+            if len(fx):
+                # ms 0.4 is right for thousands of facets and invisible for tens
+                kw = dict(FOOTPRINT_KW)
+                kw["ms"] = float(np.clip(60.0 / max(np.sqrt(len(fx)), 1.0), 0.4, 4.0))
+                ax.plot(fx / 1e3, fy / 1e3, **kw)
+        if _is_effectively_constant(vol[k]):
+            # A one-colour panel is indistinguishable from a broken one unless it says so.
+            ax.text(.5, .5, "laterally uniform\n(1-D layered model)", ha="center",
+                    va="center", transform=ax.transAxes, fontsize=11, color="w",
+                    bbox=dict(fc="0.25", ec="none", alpha=.55, pad=4))
+        ax.set_title(f"z = {z[k]:.0f} m   ({title_stat(vol[k])})", fontsize=10)
+        ax.set_xlabel("x UTM [km]")
+        ax.set_ylabel("y [km]")
+    for ax in axes.ravel()[len(depths_m):]:
+        ax.axis("off")
+    cb = None
+    if im is not None:
+        cb = fig.colorbar(im, ax=axes, shrink=0.7)
+        cb.set_label(cb_label)
+    # wrap: an overhanging suptitle makes bbox_inches="tight" widen the export and squeeze
+    # the panels into a strip down the middle (see _wrap_title)
+    fig.suptitle(_wrap_title(suptitle, figsize[0], 12)[0], fontsize=12)
+    fig._deckbuild_cb = cb          # so callers can retick a categorical colorbar
+    return fig
+
+
+def plot_material_slices(material_nc, fault=None, *, depths_m=DEFAULT_SLICES_M,
+                         vs_threshold=2500.0, figsize=(16.5, 9), cmap="viridis"):
+    """2 x 3 horizontal slices of Vs through the material nc, fault footprint on each.
+
+    The white contour is `vs_threshold`, the Roten et al. (2014) soft/hard rock split --
+    the same line that decides the plasticity friction angle, so this figure and the
+    plasticity one overlay mentally.  Each title carries the slice median and the fraction
+    below the threshold, because "how much soft rock is at this depth" is the question.
+    """
+    x, y, z, vs = vs_from_material(material_nc)
+    vmin, vmax = _clim(vs)
+
+    def stat(sl):
+        return (f"median {np.nanmedian(sl):.0f} m/s, "
+                f"{100.0 * np.nanmean(sl < vs_threshold):.1f}% < {vs_threshold:g}")
+
+    lat_uniform = bool(np.nanmax(np.nanmax(vs, axis=(1, 2)) - np.nanmin(vs, axis=(1, 2)))
+                       < 1e-9)
+    sup = (f"MATERIAL nc -- $V_s$ on horizontal slices; white = {vs_threshold:g} m/s "
+           f"contour (the Roten soft/hard split); grey = fault footprint at that depth")
+    if lat_uniform:
+        sup = ("MATERIAL nc -- this model is 1-D LAYERED, so every horizontal slice is one "
+               "colour BY CONSTRUCTION.  Nothing is wrong with the figure; there is simply "
+               "no lateral structure to show.  Use plot_material_profiles() instead, and a "
+               "CVM reader (velocity.kind = cvm_slices) if you want 3-D structure.")
+    return _slice_grid(
+        x, y, z, vs, depths_m=depths_m, fault=fault, title_stat=stat,
+        cb_label="$V_s$ [m/s]", cmap=cmap, vmin=vmin, vmax=vmax,
+        contour=vs, contour_levels=(vs_threshold,), figsize=figsize, suptitle=sup)
+
+
+def plot_plasticity_slices(plasticity_nc, fault=None, *, depths_m=DEFAULT_SLICES_M,
+                           figsize=(16.5, 9)):
+    """The same grid for the opt-in Drucker-Prager fields.  Returns [phi_fig, cohesion_fig].
+
+    phi is drawn with a two-colour ListedColormap because it takes exactly two values --
+    a continuous ramp would imply a gradient that is not there.  Cohesion is log-scaled
+    because c = 1e-4*mu spans orders of magnitude between basin and basement.
+    """
+    from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm
+
+    from deckbuild.asagi import read_asagi
+    x, y, z, f, _ = read_asagi(plasticity_nc, fields=["bulkFriction", "plastCo"])
+    phi = np.degrees(np.arctan(f["bulkFriction"]))
+    coh = f["plastCo"]
+
+    ang = np.unique(np.round(phi[np.isfinite(phi)], 4))
+    lo, hi = float(ang.min()), float(ang.max())
+    mid = 0.5 * (lo + hi)
+    cmap = ListedColormap(["#e08214", "#542788"])
+    norm = BoundaryNorm([lo - 1e-6, mid, hi + 1e-6], cmap.N)
+
+    f_phi = _slice_grid(
+        x, y, z, phi, depths_m=depths_m, fault=fault,
+        title_stat=lambda sl: f"soft {100.0 * np.mean(sl < mid):.1f}%",
+        cb_label=r"friction angle $\phi$ [deg]   (bulkFriction = $\tan\phi$)",
+        cmap=cmap, norm=norm, figsize=figsize,
+        suptitle=f"PLASTICITY nc -- Roten et al. (2014): $\\phi$ = {lo:g} deg (soft rock) "
+                 f"/ {hi:g} deg (hard rock); grey = fault footprint at that depth")
+    if getattr(f_phi, "_deckbuild_cb", None) is not None:
+        f_phi._deckbuild_cb.set_ticks([0.5 * (lo + mid), 0.5 * (hi + mid)])
+        f_phi._deckbuild_cb.set_ticklabels([f"{lo:g}", f"{hi:g}"])
+
+    cmin = max(float(np.nanmin(coh)) / 1e6, 1e-3)
+    f_coh = _slice_grid(
+        x, y, z, coh / 1e6, depths_m=depths_m, fault=fault,
+        title_stat=lambda sl: f"median {np.nanmedian(sl):.3f} MPa",
+        cb_label="cohesion $c = 10^{-4}\\mu$   [MPa, log scale]",
+        norm=LogNorm(vmin=cmin, vmax=float(np.nanmax(coh)) / 1e6), figsize=figsize,
+        suptitle="PLASTICITY nc -- Roten et al. (2014) cohesion model 3 (their eq. 5): "
+                 "$c = 10^{-4}\\mu$, so cohesion is LINEAR in the shear modulus")
+    return [f_phi, f_coh]
+
+
+# ------------------------------------------------------------------ profiles + section
+def plot_material_profiles(material_nc, fault=None, *, cfg=None, sv_profile=None,
+                           vs_threshold=2500.0, depths_m=DEFAULT_SLICES_M,
+                           figsize=(17, 10)):
+    """Slice statistics vs depth, Sv_eff(z), and the fault-following vertical section.
+
+    The section is cut along the fault's OWN CURVED trace with the same along-strike `s`
+    axis the on-fault figures use, so the two read together.  A straight chord would
+    wander off a curved fault and render it as disconnected wedges -- a hole that is not
+    there.
     """
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
 
     x, y, z, vs = vs_from_material(material_nc)
-    depths_km = list(depths_km)
-    # Both of these MUST scale with the mesh.  A fixed 0.5 km window and 240 bins are
-    # right for a 160k-facet production fault and catastrophically wrong for a 192-facet
-    # demo: the window captures no facet at all ("fault does not reach 5 km" on a fault
-    # that plainly does), and 239 of 240 bins come back empty, leaving a section that is
-    # mostly white.  Derive both from the fault itself.
-    if fault is not None:
-        if tol_km is None:
-            tol_km = _depth_tol_km(fault)
-        if nbin is None:
-            nbin = _section_nbin(fault, cfg)
-    else:
-        tol_km, nbin = (tol_km or 0.5), (nbin or 240)
-    ncol = len(depths_km)
-    figsize = figsize or (4.9 * ncol, 9.0)
-    # constrained_layout, NOT tight_layout: tight_layout cannot place colorbars added to
-    # GridSpec axes and warns that results "might be incorrect" -- and they were.
-    fig = plt.figure(figsize=figsize, layout="constrained")
-    gs = GridSpec(2, ncol + 1, figure=fig, height_ratios=[1.0, 0.92],
-                  width_ratios=[1.0] * ncol + [0.55])
+    fig = plt.figure(figsize=figsize, constrained_layout=True)
+    gs = GridSpec(2, 3, figure=fig, height_ratios=[1.0, 1.15])
 
-    vmin, vmax = _clim(vs)          # ONE scale, so the slices are comparable
+    a = fig.add_subplot(gs[0, 0])
+    p10, p50, p90 = (np.nanpercentile(vs, q, axis=(1, 2)) for q in (10, 50, 90))
+    a.plot(p50, z / 1e3, color="#2166ac", label="median")
+    a.fill_betweenx(z / 1e3, p10, p90, alpha=.25, color="#2166ac", label="10-90%")
+    a.axvline(vs_threshold, color="0.4", ls=":", lw=1.0, label=f"{vs_threshold:g} m/s")
+    for zm in depths_m:
+        a.axhline(z[_nearest_k(z, zm)] / 1e3, color="0.85", lw=.7, zorder=0)
+    a.set_xlabel("$V_s$ [m/s]")
+    a.set_ylabel("z [km]")
+    a.grid(alpha=.3)
+    a.legend(fontsize=8)
+    a.set_title("(a) $V_s$ vs depth (grey = the slice depths)", fontsize=10)
 
-    # ---- row 1: horizontal slices, sharing a single colorbar ---------------------
-    ims, row1 = None, []
-    for j, dkm in enumerate(depths_km):
-        ax = fig.add_subplot(gs[0, j])
-        k = _nearest_k(z, -dkm * 1000.0)
-        ims = ax.pcolormesh(x / 1e3, y / 1e3, vs[k], cmap=cmap, vmin=vmin, vmax=vmax,
-                            shading="auto", rasterized=True)
-        if fault is not None:
-            fx, fy = fault_trace(fault, depth_km=dkm, tol_km=tol_km)
-            if len(fx):
-                ax.plot(fx / 1e3, fy / 1e3, ".", ms=1.0, color="k", alpha=.9)
-                ax.plot([], [], "-", color="k", lw=2, label=f"fault @ {dkm:g} km")
-                ax.legend(loc="upper right", fontsize=7, framealpha=.85)
-            else:
-                ax.text(.5, .03, f"fault does not reach {dkm:g} km",
-                        transform=ax.transAxes, ha="center", fontsize=8, color="crimson")
-        ax.set_title(f"Vs at {dkm:g} km depth   (z = {z[k]:+.0f} m)", fontsize=10)
-        ax.set_xlabel("Easting (km)")
-        ax.set_ylabel("Northing (km)" if j == 0 else "")
-        if j:
-            ax.set_yticklabels([])
-        ax.set_aspect("equal")
-        row1.append(ax)
-    if ims is not None:
-        # attach to the ROW, not to a spare grid cell: a colorbar given its own tall cell
-        # floats detached at whatever height the cell happens to be.
-        fig.colorbar(ims, ax=row1, label="Vs (m/s)", fraction=.040, pad=.012,
-                     shrink=.92)
+    b = fig.add_subplot(gs[0, 1])
+    b.plot(100.0 * np.nanmean(vs < vs_threshold, axis=(1, 2)), z / 1e3, color="#e08214")
+    b.set_xlabel(f"area with $V_s$ < {vs_threshold:g} m/s  [%]")
+    b.set_ylabel("z [km]")
+    b.grid(alpha=.3)
+    b.set_title("(b) soft-rock fraction vs depth", fontsize=10)
 
-    # ---- row 2: the fault-following section --------------------------------------
-    ax = fig.add_subplot(gs[1, :ncol])
-    if fault is not None and cfg is not None:
-        sbin, prof, ztop, zbot = _section_along_fault(fault, cfg, x, y, z, vs, nbin)
-        im = ax.pcolormesh(sbin, np.asarray(z) / 1e3, prof, cmap=cmap, vmin=vmin,
-                           vmax=vmax, shading="auto", rasterized=True)
-        ax.plot(sbin, ztop, "-", color="k", lw=1.4, label="fault top / bottom")
-        ax.plot(sbin, zbot, "-", color="k", lw=1.4)
-        _annotate_bands(ax, cfg, ymax=float(np.nanmax(ztop)))
-        ax.legend(loc="lower left", fontsize=8, framealpha=.85)
-        ax.set_xlabel("along-strike s (km)  -- the same axis as the on-fault figures")
-        ax.set_title("vertical section of Vs ALONG THE FAULT TRACE "
-                     "(black = the fault's own top and bottom edges)", fontsize=10)
-    else:
-        j0 = len(y) // 2
-        im = ax.pcolormesh(x / 1e3, np.asarray(z) / 1e3, vs[:, j0, :], cmap=cmap,
-                           vmin=vmin, vmax=vmax, shading="auto", rasterized=True)
-        ax.set_xlabel("Easting (km)")
-        ax.set_title(f"vertical section of Vs at y = {y[j0] / 1e3:.0f} km "
-                     f"(no fault supplied)", fontsize=10)
-    for dkm in depths_km:
-        ax.axhline(-dkm, color="w", lw=.9, ls="--", alpha=.75)
-    # Crop to the fault plus a margin.  A 45 km-deep grid squeezes the 0-19 km the fault
-    # actually occupies into the top third, which is the part you came here to read.
-    if zlim_km is None and fault is not None:
-        zbot_km = -float(fault.depth_m.max()) / 1e3
-        zlim_km = (max(float(np.min(z)) / 1e3, 1.6 * zbot_km), float(np.max(z)) / 1e3)
-    if zlim_km is not None:
-        ax.set_ylim(*zlim_km)
-    ax.set_ylabel("z (km, elevation)")
-    fig.colorbar(im, ax=ax, label="Vs (m/s)", fraction=.030, pad=.012)
-
+    c = fig.add_subplot(gs[0, 2])
     if sv_profile is not None:
-        axs = fig.add_subplot(gs[1, ncol])
         svp = np.load(sv_profile)
-        axs.plot(svp["sv_eff_mpa"], svp["depth_m"] / 1e3, lw=1.8)
-        axs.invert_yaxis()
-        axs.set_xlabel("Sv_eff (MPa)")
-        axs.set_ylabel("depth (km)")
-        axs.set_title("vertical effective stress\n(SEA-LEVEL referenced)", fontsize=9)
-        axs.grid(alpha=.3)
+        c.plot(svp["sv_eff_mpa"], -svp["depth_m"] / 1e3, lw=1.8, color="#762a83")
+        c.set_xlabel("$S_v^{eff}$ [MPa]")
+        c.set_ylabel("z [km]")
+        c.grid(alpha=.3)
+        c.set_title("(c) vertical effective stress, SEA-LEVEL referenced", fontsize=10)
+    else:
+        c.axis("off")
 
-    fig.suptitle("MATERIAL CHECK -- the velocity model the deck will ship, "
-                 "with the fault taken from the mesh", fontsize=12, fontweight="bold")
+    d = fig.add_subplot(gs[1, :])
+    if fault is not None and cfg is not None:
+        sbin, prof, ztop, zbot = _section_along_fault(
+            fault, cfg, x, y, z, vs, _section_nbin(fault, cfg))
+        vmin, vmax = _clim(vs)
+        im = d.pcolormesh(sbin, z / 1e3, prof, cmap="viridis", vmin=vmin, vmax=vmax,
+                          shading="auto", rasterized=True)
+        d.plot(sbin, ztop, "-", color="k", lw=1.4, label="fault top / bottom")
+        d.plot(sbin, zbot, "-", color="k", lw=1.4)
+        _mark_bands(d, cfg)
+        d.set_ylim(max(float(z.min()) / 1e3, 1.6 * float(np.nanmin(zbot))),
+                   float(z.max()) / 1e3)
+        d.set_xlabel("along-strike s (km)")
+        d.set_ylabel("z (km)")
+        d.legend(fontsize=8, loc="lower left")
+        fig.colorbar(im, ax=d, label="$V_s$ [m/s]")
+        d.set_title("(d) $V_s$ on a vertical section ALONG THE FAULT TRACE -- same s axis "
+                    "as the on-fault figures, so a slow column lines up with the facets "
+                    "it weakens", fontsize=10)
+    else:
+        d.axis("off")
+
+    fig.suptitle("MATERIAL nc -- depth structure, and the section the fault actually sees",
+                 fontsize=12, fontweight="bold")
     return fig
 
 
 def _section_along_fault(fault, cfg, x, y, z, vol, nbin=240):
-    """Sample `vol` down the fault's own curved trace.
+    """Sample `vol` down the fault's own curved trace at `nbin` evenly spaced s positions.
 
-    Returns (s_km_bin_centres, (nz, nbin) values, z_top_km, z_bot_km).  Bins with no
-    facets are NaN in every output, so a genuine gap in the fault stays a visible gap
-    instead of being interpolated over.
+    Returns (s_km, (nz, nbin) values, z_top_km, z_bot_km).
+
+    Each output column takes the fault's real (x, y) from the facets NEAREST it in s, not
+    from "the facets that happen to fall inside this bin".  Binning leaves a column empty
+    whenever the facet spacing is uneven -- which it always is on an unstructured mesh --
+    and an empty column renders as a white stripe through the section.  Nearest-column
+    assignment cannot produce one.
+
+    A genuine gap in the fault is still reported: `gap_km` marks columns whose nearest
+    facet is further away than the local column spacing, and the caller masks those.
     """
     s = fault.s_km(cfg.strike)
-    edges = np.linspace(float(s.min()), float(s.max()), nbin + 1)
-    ctr = 0.5 * (edges[:-1] + edges[1:])
-    idx = np.clip(np.digitize(s, edges) - 1, 0, nbin - 1)
+    s0, s1 = float(s.min()), float(s.max())
+    sq = np.linspace(s0, s1, nbin)
+    ds = (s1 - s0) / max(nbin - 1, 1)
 
+    j = np.clip(np.rint((s - s0) / ds).astype(int), 0, nbin - 1)   # facet -> nearest column
     prof = np.full((len(z), nbin), np.nan)
     ztop = np.full(nbin, np.nan)
     zbot = np.full(nbin, np.nan)
-    for b in range(nbin):
-        m = idx == b
-        if not m.any():
-            continue
-        xc, yc = np.median(fault.cent[m, 0]), np.median(fault.cent[m, 1])
-        ix = int(np.clip(np.searchsorted(x, xc), 0, len(x) - 1))
-        iy = int(np.clip(np.searchsorted(y, yc), 0, len(y) - 1))
-        prof[:, b] = vol[:, iy, ix]
-        ztop[b] = fault.cent[m, 2].max() / 1e3
-        zbot[b] = fault.cent[m, 2].min() / 1e3
-    return ctr, prof, ztop, zbot
+    have = np.zeros(nbin, bool)
+
+    order = np.argsort(j, kind="stable")
+    js, starts = np.unique(j[order], return_index=True)
+    groups = np.split(order, starts[1:])
+    for jj, g in zip(js, groups):
+        ix = int(np.clip(np.searchsorted(x, np.median(fault.cent[g, 0])), 0, len(x) - 1))
+        iy = int(np.clip(np.searchsorted(y, np.median(fault.cent[g, 1])), 0, len(y) - 1))
+        prof[:, jj] = vol[:, iy, ix]
+        ztop[jj] = fault.cent[g, 2].max() / 1e3
+        zbot[jj] = fault.cent[g, 2].min() / 1e3
+        have[jj] = True
+
+    if not have.all():
+        # fill from the nearest populated column -- the material varies smoothly laterally,
+        # so the nearest real fault column is the honest value, and it beats a white stripe.
+        src = np.where(have)[0]
+        if len(src):
+            near = src[np.abs(np.arange(nbin)[:, None] - src[None, :]).argmin(1)]
+            prof[:, ~have] = prof[:, near[~have]]
+            ztop[~have] = ztop[near[~have]]
+            zbot[~have] = zbot[near[~have]]
+    return sq, prof, ztop, zbot
 
 
-# ------------------------------------------------------------------ on-fault figure
+# ----------------------------------------------------------------- on-fault (s, z) maps
+_WHAT = {
+    "sigma_n (MPa)": "effective normal stress -- the confinement everything else scales "
+                     "with",
+    "tau_0 (MPa)": "initial shear traction resolved on each facet",
+    "mu_app": "apparent friction $\\tau/\\sigma_n$ -- Sv-INVARIANT, so it reads the "
+              "orientation and $k$ alone",
+    r"$\Delta\tau_{dyn}$ (MPa)": "dynamic stress drop the run will actually pay out",
+    "S (capped at 10)": "strength parameter: higher = harder to break",
+    "$f_w$": "the dynamic friction floor the rs_muw LuaMap ships",
+}
+
+
 def plot_onfault(fault, cfg, fields: dict, *, snap=None, f0=None, fw=None,
-                 cmap="viridis", figsize=None, ncol=2, map_view=True):
-    """On-fault maps in the fault's own (s, depth) frame, plus an optional map view.
+                 fw_design=None, title=None, cmap="viridis", figsize=None,
+                 map_view=True):
+    """Lettered (s, z) panels on the real fault, in the legacy house style.
 
-    `fields` is {label: per-facet array}.  Beyond whatever you pass, two derived panels
-    are added when the inputs allow it, because they are what actually decides a design:
+    `fields` is {label: per-facet array}.  Two DERIVED panels are appended when their
+    inputs are supplied -- never from a guessed default, because a guessed f_w would make
+    a wrong design look right:
 
-        dtau_dyn = (mu_app - f_w) * sigma_n     the drop each patch can pay out
-        S        = (f0*sigma_n - tau)/(tau - f_w*sigma_n)
-                                                the strength parameter; higher = harder
-                                                to break.  Capped at 10 for readability.
+        dtau_dyn = (mu_app - f_w) * sigma_n           what each patch can pay out
+        S = (f0*sigma_n - tau)/(tau - f_w*sigma_n)    higher = harder to break (capped 10)
 
-    Every panel gets percentile colour limits, the named gate bands, and the hypocentre.
+    Axis convention is the legacy one: **z (km), negative down**, not inverted depth.
     """
     import matplotlib.pyplot as plt
 
     s = fault.s_km(cfg.strike)
-    d = fault.depth_m / 1000.0
+    zk = -fault.depth_m / 1000.0
     panels = [(k, np.asarray(v, float)) for k, v in fields.items()]
 
     sn = fields.get("sigma_n (MPa)")
@@ -295,66 +475,125 @@ def plot_onfault(fault, cfg, fields: dict, *, snap=None, f0=None, fw=None,
     mu = fields.get("mu_app")
     if sn is not None and mu is not None and fw is not None:
         panels.append((r"$\Delta\tau_{dyn}$ (MPa)",
-                       (np.asarray(mu, float) - np.asarray(fw, float)) * np.asarray(sn, float)))
+                       (np.asarray(mu, float) - np.asarray(fw, float))
+                       * np.asarray(sn, float)))
     if sn is not None and tau is not None and f0 is not None:
         fwv = np.zeros_like(np.asarray(sn, float)) if fw is None else np.asarray(fw, float)
         with np.errstate(divide="ignore", invalid="ignore"):
-            S = (f0 * np.asarray(sn, float) - np.asarray(tau, float)) / \
-                (np.asarray(tau, float) - fwv * np.asarray(sn, float))
+            S = ((f0 * np.asarray(sn, float) - np.asarray(tau, float))
+                 / (np.asarray(tau, float) - fwv * np.asarray(sn, float)))
         panels.append(("S (capped at 10)", np.clip(S, 0, 10)))
 
-    # one (s, depth) panel per field, stacked full width -- a 270 km x 20 km fault is
-    # extremely wide, so side-by-side columns squash it into an unreadable strip.
-    nrow = len(panels) + (1 if map_view else 0)
-    figsize = figsize or (13.0, 2.65 * nrow + 0.8)
-    fig, ax = plt.subplots(nrow, 1, figsize=figsize, squeeze=False, layout="constrained")
+    n = len(panels) + (1 if map_view else 0)
+    figsize = tuple(figsize) if figsize else (15.0, 3.5 * n + 1.2)
+    fig, ax = plt.subplots(n, 1, figsize=figsize, squeeze=False)
     ax = ax.ravel()
+    s_lim = (float(s.min()) - 8.0, float(s.max()) + 8.0)
+    letters = "abcdefghij"
 
-    for a_, (label, v) in zip(ax, panels):
+    fig.canvas.draw()                    # realise the axes so marker sizing is honest
+    ms_area = _marker_area(ax[0], len(fault))
+    for i, (a_, (label, v)) in enumerate(zip(ax, panels)):
         vmin, vmax = _clim(v)
-        sc = a_.scatter(s, d, c=v, s=3, cmap=cmap, vmin=vmin, vmax=vmax, rasterized=True)
-        # label the colorbar, not the title: repeating the same string twice per panel
-        # spends the reader's attention on nothing.
-        cb = fig.colorbar(sc, ax=a_, label=label, fraction=.030, pad=.010)
-        # A field that is constant to within roundoff gets rendered by matplotlib as an
-        # offset like "1e-8 + 2.592592e-1", which reads as structure and is not.  Say
-        # what it actually is instead -- on a uniform planar fault, mu_app really is
-        # constant, and that is the useful statement.
-        if _is_effectively_constant(v):
-            cb.formatter.set_useOffset(False)
-            cb.update_ticks()
-            a_.text(.01, .06, f"{label} is CONSTANT to ~1 part in 1e6 "
-                              f"({np.nanmean(v):.4g})", transform=a_.transAxes,
-                    fontsize=7.5, color="0.25",
-                    bbox=dict(fc="white", ec="0.7", alpha=.85, pad=1.5))
-        _annotate_bands(a_, cfg)
+        sc = a_.scatter(s, zk, c=v, s=ms_area, cmap=cmap, vmin=vmin, vmax=vmax,
+                        rasterized=True)
+        fig.colorbar(sc, ax=a_, label=label)
+        _mark_bands(a_, cfg, label_first=(i == 0))
+        _mark_boundaries(a_, fw_design)
         if snap is not None:
-            a_.plot([snap.s_km], [snap.depth_m / 1000.0], "*", ms=14, mfc="crimson",
-                    mec="w", mew=.9, zorder=6, label="hypocentre")
-        a_.invert_yaxis()
-        a_.set_ylabel("depth (km)")
-        a_.margins(x=.01)
-    ax[len(panels) - 1 if not map_view else len(panels) - 1].set_xlabel(
-        "along-strike s (km)")
-    if snap is not None:
-        ax[0].legend(loc="lower right", fontsize=8, framealpha=.85)
+            a_.plot([snap.s_km], [-snap.depth_m / 1000.0],
+                    label="hypocenter" if i == 0 else None, **HYPO_KW)
+        if _is_effectively_constant(v):
+            a_.text(.01, .07, f"{label} is CONSTANT to ~1 part in $10^6$ "
+                              f"({np.nanmean(v):.4g})", transform=a_.transAxes,
+                    fontsize=8, color="0.25",
+                    bbox=dict(fc="white", ec="0.7", alpha=.85, pad=1.5))
+        a_.set_xlim(s_lim)
+        a_.set_xlabel("along-strike s (km)")
+        a_.set_ylabel("z (km)")
+        a_.set_title(f"({letters[i]}) {_WHAT.get(label, label)}", fontsize=10)
+        # legend() with nothing labelled warns and draws an empty box; only the first
+        # panel carries labels, and only when there is a band or a hypocentre to name.
+        if i == 0 and a_.get_legend_handles_labels()[0]:
+            a_.legend(fontsize=8, loc="lower right")
 
     if map_view:
         a_ = ax[len(panels)]
         key, v = panels[0]
         vmin, vmax = _clim(v)
-        sc = a_.scatter(fault.cent[:, 0] / 1e3, fault.cent[:, 1] / 1e3, c=v, s=3,
-                        cmap=cmap, vmin=vmin, vmax=vmax, rasterized=True)
-        fig.colorbar(sc, ax=a_, label=key, fraction=.030, pad=.010)
+        sc = a_.scatter(fault.cent[:, 0] / 1e3, fault.cent[:, 1] / 1e3, c=v,
+                        s=min(ms_area, 40.0), cmap=cmap, vmin=vmin, vmax=vmax,
+                        rasterized=True)
+        fig.colorbar(sc, ax=a_, label=key)
         if snap is not None:
-            a_.plot([snap.xyz[0] / 1e3], [snap.xyz[1] / 1e3], "*", ms=14, mfc="crimson",
-                    mec="w", mew=.9, zorder=6)
-        a_.set_aspect("equal")
-        a_.set_xlabel("Easting (km)")
-        a_.set_ylabel("Northing (km)")
-        a_.set_title(f"map view of {key} -- the fault's real trace, "
-                     f"so a kink here is a kink in the mesh", fontsize=9)
+            a_.plot([snap.xyz[0] / 1e3], [snap.xyz[1] / 1e3], label="hypocenter",
+                    **HYPO_KW)
+            a_.legend(fontsize=8, loc="lower left")
 
-    fig.suptitle("ON-FAULT CHECK -- sampled from the WRITTEN nc at the real facets",
-                 fontsize=12, fontweight="bold")
+        a_.set_aspect("equal")
+        a_.set_anchor("C")
+        a_.set_xlabel("UTM easting (km)")
+        a_.set_ylabel("UTM northing (km)")
+        a_.grid(alpha=.3)
+        a_.set_title(f"({letters[len(panels)]}) the same field on the REAL fault (map "
+                     f"view) -- a kink here is a kink in the MESH", fontsize=10)
+
+    top = _suptitle(fig, title or
+                    f"ON-FAULT CHECK -- {len(fault):,} facets, sampled from the WRITTEN "
+                    f"nc at the real facet centroids", figsize)
+    fig.tight_layout(rect=(0, 0, 1, top))
     return fig
+
+
+def onfault_report(fault, cfg, sigma_n, tau, mu_app, *, f0=None, fw=None,
+                   fw_design=None, seis_band_km=None) -> str:
+    """The text diagnostics that belong under `plot_onfault`.
+
+    A figure shows a pattern; these are the numbers you quote and compare between designs.
+    Mirrors the legacy per-region printout.
+    """
+    s = fault.s_km(cfg.strike)
+    dkm = fault.depth_m / 1000.0
+    sn, ta, mu = (np.asarray(a, float) for a in (sigma_n, tau, mu_app))
+    band = seis_band_km or getattr(getattr(cfg, "physics", None), "seis_band_km", None)
+
+    L = [f"on-fault summary over {len(fault):,} facets, "
+         f"s {s.min():.1f} to {s.max():.1f} km, depth 0 to {dkm.max():.1f} km",
+         f"  sigma_n  min {np.nanmin(sn):8.3f}  median {np.nanmedian(sn):8.3f}  "
+         f"max {np.nanmax(sn):8.3f}  MPa",
+         f"  tau_0    min {np.nanmin(ta):8.3f}  median {np.nanmedian(ta):8.3f}  "
+         f"max {np.nanmax(ta):8.3f}  MPa",
+         f"  mu_app   min {np.nanmin(mu):8.4f}  median {np.nanmedian(mu):8.4f}  "
+         f"max {np.nanmax(mu):8.4f}"]
+
+    if band is not None:
+        m = (dkm >= band[0]) & (dkm <= band[1])
+        if m.any():
+            L.append(f"  seismogenic corridor {band[0]:g}-{band[1]:g} km: "
+                     f"{int(m.sum()):,} facets, median mu_app {np.nanmedian(mu[m]):.4f}")
+
+    fwv = None if fw is None else np.asarray(fw, float)
+    if fwv is not None:
+        dt = (mu - fwv) * sn
+        L.append(f"  dtau_dyn median {np.nanmedian(dt):.2f} MPa "
+                 f"({100.0 * np.nanmean(dt <= 0):.2f}% locked, i.e. f_w >= mu_app)")
+        bounds = _design_bounds(fw_design)
+        if bounds:
+            edges = [-np.inf] + [w[0] for w in bounds] + [np.inf]
+            for i in range(len(edges) - 1):
+                m = (s >= edges[i]) & (s < edges[i + 1])
+                if not m.any():
+                    continue
+                d_new = np.nanmedian((mu[m] - fwv[m]) * sn[m])
+                d_ref = np.nanmedian(mu[m] * sn[m])
+                rem = 100.0 * (1.0 - d_new / d_ref) if d_ref else 0.0
+                L.append(f"    region {i + 1}: f_w={np.nanmedian(fwv[m]):<8.4g} "
+                         f"dtau_dyn {d_ref:6.2f} -> {d_new:6.2f} MPa "
+                         f"({rem:5.1f}% removed), "
+                         f"{100.0 * np.nanmean((mu[m] - fwv[m]) * sn[m] <= 0):.2f}% locked")
+
+    if f0 is not None:
+        ok = np.nanmax(mu) < f0
+        L.append(f"  no pre-slip requires max mu_app < f0: {np.nanmax(mu):.4f} < {f0:g} "
+                 f" ->  {'OK' if ok else 'VIOLATED'}")
+    return "\n".join(L)

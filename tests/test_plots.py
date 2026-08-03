@@ -73,25 +73,40 @@ def test_every_requested_depth_finds_facets_at_any_mesh_density(n_along, n_down)
 
 
 # ------------------------------------------------------------------- the section bins
-def test_section_bins_are_not_mostly_empty_on_a_coarse_fault():
-    """240 fixed bins over 192 facets left 239 of them NaN -- a near-white section."""
-    f = _synthetic_fault(16, 12)
+def test_section_has_no_empty_column_at_any_mesh_density():
+    """Every output column must carry a fault sample.
+
+    Two algorithms failed this before. Binning into 240 fixed bins left 239 of 240 empty
+    on the 192-facet demo. Binning into `len(fault)//8` still left a third empty, because
+    those 192 facets sit in only 16 distinct along-strike columns. Both rendered as white
+    stripes through the section -- indistinguishable from a hole in the fault.
+
+    The fix is not a better bin count: it is to sample the NEAREST fault column at each
+    output position, which cannot produce an empty one. So the invariant asserted here is
+    "no empty column", not "few enough columns" -- the latter was a proxy for a specific
+    algorithm and went stale the moment the algorithm improved.
+    """
+    from deckbuild.plots import _section_along_fault, _section_nbin
+
     box = GridBox(xmin=-30_000., xmax=30_000., ymin=-30_000., ymax=30_000.,
                   zmin=-20_000., zmax=0., dx=2000., dz=1000.)
     gx = np.arange(box.xmin, box.xmax + box.dx, box.dx)
     gy = np.arange(box.ymin, box.ymax + box.dx, box.dx)
     gz = np.arange(box.zmin, box.zmax + box.dz, box.dz)
-    vol = np.ones((len(gz), len(gy), len(gx)))
+    vol = np.random.default_rng(0).random((len(gz), len(gy), len(gx))) + 1.0
 
-    from deckbuild.plots import _section_nbin
-    nbin = _section_nbin(f, _Cfg())                    # the adaptive rule in plots.py
-    assert nbin <= 16, ("the bin count must not exceed the fault's 16 distinct "
-                        f"along-strike columns; got {nbin}")
-    ctr, prof, ztop, zbot = _section_along_fault(f, _Cfg(), gx, gy, gz, vol, nbin)
-    filled = np.mean(np.isfinite(ztop))
-    assert filled > 0.8, f"only {filled:.0%} of section bins carry a facet"
-    assert prof.shape == (len(gz), nbin)
-    assert np.all(ztop[np.isfinite(ztop)] >= zbot[np.isfinite(zbot)])
+    for n_along, n_down in [(16, 12), (60, 40), (300, 120)]:
+        f = _synthetic_fault(n_along, n_down)
+        nbin = _section_nbin(f, _Cfg())
+        ctr, prof, ztop, zbot = _section_along_fault(f, _Cfg(), gx, gy, gz, vol, nbin)
+        assert prof.shape == (len(gz), nbin)
+        assert np.isfinite(ztop).all(), (
+            f"{int((~np.isfinite(ztop)).sum())} of {nbin} columns empty on a "
+            f"{len(f)}-facet fault -- white stripes through the section")
+        assert np.isfinite(prof).all(), "the sampled field has holes"
+        assert np.all(ztop >= zbot)
+        assert ctr[0] == pytest.approx(f.s_km(STRIKE).min())
+        assert ctr[-1] == pytest.approx(f.s_km(STRIKE).max())
 
 
 # ----------------------------------------------------------------- constant detection
@@ -115,9 +130,11 @@ def test_plot_onfault_adds_the_derived_panels_only_when_it_can():
     with_f0 = plot_onfault(f, _Cfg(), fields, f0=0.6, map_view=False)
     with_fw = plot_onfault(f, _Cfg(), fields, f0=0.6, fw=np.full(len(f), .1),
                            map_view=False)
-    n_bare = len([a for a in bare.axes if a.get_ylabel() == "depth (km)"])
-    n_f0 = len([a for a in with_f0.axes if a.get_ylabel() == "depth (km)"])
-    n_fw = len([a for a in with_fw.axes if a.get_ylabel() == "depth (km)"])
+    # "z (km)", not "depth (km)": the module follows the legacy convention of plotting
+    # z NEGATIVE-DOWN rather than an inverted positive-depth axis.
+    def n_panels(fig):
+        return len([a for a in fig.axes if a.get_ylabel() == "z (km)"])
+    n_bare, n_f0, n_fw = n_panels(bare), n_panels(with_f0), n_panels(with_fw)
     assert n_bare == 3, "no derived panel is possible without f0 or f_w"
     assert n_f0 == 4, "f0 alone buys the S panel"
     assert n_fw == 5, "f0 + f_w buys both S and dtau_dyn"
@@ -127,7 +144,7 @@ def test_plot_onfault_map_view_is_optional_and_uses_real_coordinates():
     f = _synthetic_fault(40, 20)
     fields = {"sigma_n (MPa)": 10.0 + f.depth_m / 1e3}
     fig = plot_onfault(f, _Cfg(), fields, map_view=True)
-    maps = [a for a in fig.axes if a.get_xlabel() == "Easting (km)"]
+    maps = [a for a in fig.axes if a.get_xlabel() == "UTM easting (km)"]
     assert len(maps) == 1
     xs, _ = maps[0].collections[0].get_offsets().T
     assert np.allclose(xs, f.cent[:, 0] / 1e3), "the map view must plot real coordinates"
