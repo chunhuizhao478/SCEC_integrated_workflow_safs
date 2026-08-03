@@ -16,9 +16,16 @@ dependencies:
   # --- projection ---
   - pyproj=3.6.*
   # --- figures / notebooks ---
-  - matplotlib=3.8.*
+  # 3.10, NOT 3.8: matplotlib 3.8 calls IPython.core.pylabtools.backend2gui, which
+  # IPython REMOVED in 9.16.0.  The pair 3.8 + a current IPython raises ImportError the
+  # moment pyplot picks a backend, so every notebook cell that plots dies.  3.10 does not
+  # call it at all, which makes the IPython version stop mattering.
+  - matplotlib=3.10.*
   - jupyterlab
   - nbconvert
+  - nbformat               # tests/test_notebook.py imports it directly
+  - ipykernel              # REQUIRED to register this env as a notebook kernel;
+                           # jupyterlab does not pull it in on its own
   # --- tests ---
   - pytest>=7,<10          # validated on 9.0.2
   # --- mesh generation (OPTIONAL: only the code-mesh-build-improve skill needs it) ---

@@ -49,20 +49,84 @@ outputs/            build artifacts (gitignored)
 data/<project>/     raw inputs and caches (gitignored, except the demo mesh)
 ```
 
-## Quick start
+## Setup
+
+You need `conda` or `mamba` ([miniforge](https://github.com/conda-forge/miniforge) is the
+easiest way to get either). `mamba` resolves this environment in seconds where `conda` can
+take minutes — use it if you have it.
 
 ```bash
-conda env create -f environment.yml
+git clone https://github.com/chunhuizhao478/SCEC_integrated_workflow_safs.git
+cd SCEC_integrated_workflow_safs
+
+mamba env create -f environment.yml     # or: conda env create -f environment.yml
 conda activate deckbuild
-pytest -q
-jupyter lab deck_workflow.ipynb                 # the guided workflow
-python run_workflow.py --project demo_planar    # or headless, same chain
+
+# register this env as a Jupyter kernel -- REQUIRED, see below
+python -m ipykernel install --user --name deckbuild --display-name "deckbuild"
+
+pytest -q                               # expect: 312 passed
 ```
 
-> **Validated on:** Python 3.13 / pytest 9.0.2 / PyYAML 6.0.3, via an existing conda env.
-> `environment.yml` describes the *intended* pinned environment (Python 3.11) and has not
-> itself been built yet — build it before relying on the pins, especially `scipy`, which
-> Phase 8 depends on for reproducibility.
+Then open the notebook and **select the kernel**:
+
+```bash
+jupyter lab deck_workflow.ipynb
+```
+
+> **Kernel → Change kernel → deckbuild.**
+>
+> Do not skip this. Creating the environment is not enough: JupyterLab only offers kernels
+> that have been *registered*, and if you launch it from a different environment the
+> notebook silently runs against that environment's packages instead — which looks exactly
+> like "missing packages" no matter how many times you reinstall.
+
+Prefer to stay in the terminal? The same chain runs headless, no kernel needed:
+
+```bash
+python run_workflow.py --project demo_planar
+```
+
+`demo_planar` is a synthetic example that needs **zero downloads** — it builds its own mesh
+and runs the full seven-stage chain, so it is the fastest way to confirm a working install.
+
+### Validated environment
+
+Built from scratch and tested on macOS (darwin, arm64) on 2026-08-02:
+
+| | |
+|:--|:--|
+| python | 3.11 |
+| numpy / scipy | 1.26 / 1.11 |
+| netCDF4 / h5py | 1.6 / 3.10 |
+| meshio / pyproj | 5.3 / 3.6 |
+| matplotlib | 3.10 |
+| pytest | 9.x — 312 passed |
+
+Two pins are deliberate and should not be relaxed casually:
+
+- **`scipy=1.11.*`** — `scipy.spatial.Delaunay` decides the CVM interpolation, and a
+  different triangulation of the same scattered points changes the rebuilt material field.
+  See `docs/EXERCISE_safs_reproduction.md`.
+- **`matplotlib=3.10.*`** — matplotlib 3.8 calls `IPython.core.pylabtools.backend2gui`,
+  which IPython **removed in 9.16.0**. That pair raises `ImportError` the moment `pyplot`
+  selects a backend, killing every cell that plots. 3.10 never calls it, so the IPython
+  version stops mattering.
+
+### Troubleshooting
+
+| symptom | cause | fix |
+|:--|:--|:--|
+| `ModuleNotFoundError` for `netCDF4`, `pyproj`, `yaml`, … in the notebook | the notebook is on a different kernel | Kernel → Change kernel → **deckbuild** |
+| `deckbuild` is not offered as a kernel | `ipykernel install` was never run | re-run the register step above |
+| `ImportError: cannot import name 'backend2gui'` | `matplotlib` 3.8 with IPython ≥ 9.16 | you are on an old `environment.yml`; `git pull` and rebuild |
+| a stage cannot find its raw inputs | descriptor paths are relative to `data/<project>/` | check `Project.load(..., require_files=True)` output — it names the missing file |
+
+To rebuild the environment from scratch:
+
+```bash
+conda deactivate && mamba env remove -n deckbuild -y && mamba env create -f environment.yml
+```
 
 In a notebook or REPL:
 
