@@ -29,6 +29,13 @@ stage_f.py      the mesh<->deck seam.  Its predicates are SHARED with deck.py's 
                 the two batteries cannot drift.
 deck.py         assemble a runnable deck + the P1-P8 pre-flight + diff.
 introspect.py   recover a descriptor from a SHIPPED deck.  Marks what it cannot infer.
+plots.py        the two check figures: material slices + a fault-following section, and
+                the on-fault (s, depth) maps.  Both read FILES already written, so what
+                you look at is what SeisSol reads.  Three things it must do and any
+                replacement must too: take the fault trace AT each slice depth (a 3-D
+                surface moves with depth), scale the depth window and the section binning
+                to the MESH (constants tuned on a 160k-facet fault silently blank out a
+                192-facet one), and use PERCENTILE colour limits.
 ```
 
 ## The dependency chain (order is load-bearing)
