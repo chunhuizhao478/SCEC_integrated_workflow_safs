@@ -91,7 +91,8 @@ def build_uniform_grid(cx, cy, dx: float):
 
 
 def interp_slices(paths, crs, field_names, grid_dx, z_min, z_max, dz,
-                  extend_z_top=0.0, expect_spacing_m=None, warn_on_gap=True):
+                  extend_z_top=0.0, expect_spacing_m=None, warn_on_gap=True,
+                  transform=None):
     """The full two-stage pipeline.  Returns (gx, gy, gz, {field: (nz,ny,nx)}, info)."""
     from pyproj import Transformer
     from scipy.interpolate import LinearNDInterpolator
@@ -166,9 +167,25 @@ def interp_slices(paths, crs, field_names, grid_dx, z_min, z_max, dz,
         z_src = np.concatenate([z_src, [z_src[-1] + extend_z_top]])
         stack = np.concatenate([stack, stack[-1:]], axis=0)
 
-    # Stage 2: resample onto the uniform axis.  The CALLER converts to moduli BEFORE
-    # calling this when that matters (see material._cvm_slices).
+    # RULE 1 -- any nonlinear conversion happens HERE, on the SOURCE-node stack, BEFORE
+    # the vertical resample.  mu = rho*Vs^2 is quadratic, so resampling Vs and squaring
+    # afterwards is not the same function as squaring and then resampling: the two differ
+    # by w(1-w)*rho*(Vs_hi - Vs_lo)^2 at every output level BETWEEN two source slices, and
+    # agree exactly on levels that coincide with one -- which is why source-level spot
+    # checks pass while 75.8% of the volume is wrong.  Measured on the SAFS ALT grid the
+    # inversion moved mu by a median 2.0e-5 and up to 18.8%, and flipped 2,878 plasticity
+    # nodes between soft and hard rock.
+    # legacy: generate_velocity_nc_from_raw.py:507-511 (velocities_to_moduli THEN
+    # resample_z).
+    if transform is not None:
+        stack, field_names = transform(stack, list(field_names))
+
+    # Stage 2: resample onto the uniform axis.
     gz = np.arange(z_min, z_max + 0.5 * dz, dz)
+    # The half-step pad in the stop value lets arange emit one node ABOVE z_max whenever
+    # (z_max - z_min)/dz has a fractional part in (0.5, 1).  legacy: :495-497.
+    if len(gz) and gz[-1] > z_max:
+        gz = gz[:-1]
     out = {}
     for k, name in enumerate(field_names):
         src = stack[:, k]                              # (nz_src, nx, ny)

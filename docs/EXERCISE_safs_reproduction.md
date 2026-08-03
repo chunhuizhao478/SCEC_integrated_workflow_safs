@@ -50,31 +50,56 @@ intermediate_plast_phi30_40_gradedfw_k1p70_nwredM7p8_sefw0_attenuation_deep40km`
 Stress and plasticity are built from the SHIPPED material nc, which isolates them from the
 CVM input difference below.
 
-### The CVM difference is the INPUT DATA, not the port
+### The CVM: a REAL PORT BUG (now fixed), plus an environmental residual
 
-Two hypotheses recorded here earlier were **both wrong**, and the tests that killed them:
+An earlier revision of this document claimed the whole CVM difference was input data and
+"not our code". **That was wrong**, and the way it was wrong is worth keeping.
 
-- ~~degenerate Delaunay triangulation~~ — **disproved**. Reversing the point order changes
-  0 of 163,172 nodes, and the order-sensitive set does not overlap the differing set at
-  all. The source is a complete 124 x 82 lattice and the CSV is already in the legacy's
-  `meshgrid(..., indexing="ij")` order, so both sides build the *same* triangulation.
-- ~~scipy / Qhull version~~ — **disproved** by the same test and by the one below.
+**The bug: moduli were formed AFTER the vertical resample.** The legacy converts velocities
+to moduli at the SOURCE NODES and only then resamples
+(`generate_velocity_nc_from_raw.py:507-511`). The port resampled first and formed
+`mu = rho*Vs^2` afterwards. mu is quadratic in Vs, so the two orders are different
+functions: they differ by `w(1-w)*rho*(Vs_hi - Vs_lo)^2` at every output level BETWEEN two
+slices, and agree EXACTLY on levels that coincide with one. Measured: 75.8% of mu values
+differed, median 2.0e-5, max 18.8%, 2,878 plasticity nodes flipped soft<->hard, worst at
+z = -250 m. The port's own comment documented the rule it was breaking -- "The CALLER
+converts to moduli BEFORE calling this" -- and the caller did not.
 
-What settles it: running the **legacy's own** `build_utm_grid` and `resample_to_utm`
-(`toolbox/generate_velocity_nc_from_raw/generate_velocity_nc_from_raw.py`, the converter
-named in the shipped nc's own attributes) on our staged CSVs reproduces **the same 4,054
-differing nodes and the same max abs diff of 198.9** that our port produces. And comparing
-our port against that legacy function directly gives **bit-identical float64 output, 0 of
-163,172 nodes differing**.
+**Why the earlier verification missed it.** It compared at z = 0, which IS a source slice
+depth -- exactly where the two orders agree. A bit-exact result there was then generalised
+to the volume, which the test did not support. Source-level spot checks cannot see this
+class of bug; that is the whole point of it.
 
-So the port reproduces the legacy algorithm exactly. The staged CSVs are simply not the
-files that built the shipped nc, despite identical filenames — those names are opaque IDs
-(`CVM_1782322764534_h_data.csv`) and the shipped nc records a Google Drive `source_raw_dir`
-while ours are local. The differing nodes are all low-density basin material,
-1295-1944 kg/m^3, which is where a CVM revision would show and where the field has enough
-curvature for a small input change to exceed float32.
+After the fix, `interp_slices` takes a `transform` hook applied to the source stack before
+the resample, and the port is **bit-identical to the legacy code over the whole volume**:
+0 of 31,655,368 nodes differ, checked at z = 0, -250, -500, -1750 and -19000 m.
 
-**Consequence:** an exact CVM reproduction needs the original slice files, not a code fix.
+**The residual against the SHIPPED file is environmental.** What is left is a constant
+~2.47% of nodes at every level (4,022-4,054 of 163,172), with median relative error
+**exactly 0.000e+00** -- i.e. the vast majority of the volume is bit-identical and the
+remainder is a horizontal, stage-1 difference. Running the LEGACY's own
+`build_utm_grid`/`resample_to_utm` on our staged CSVs reproduces the SAME node count and
+the SAME max abs diff, so it is not the algorithm on either side. It is either the qhull
+build that produced the shipped file or a revision of the slice files themselves; the
+shipped nc records a Google Drive `source_raw_dir` while ours are local, and the affected
+nodes are all low-density basin material (1295-1944 kg/m^3) where the field has enough
+curvature for a small input change to exceed float32. Distinguishing those two remaining
+causes needs the original slice files, not a code change.
+
+Three further divergences from the same audit, all fixed:
+
+- **plasticity was derived from the pre-write float64 arrays.** The legacy reads the
+  material FILE back (`build_plasticity_roten2014.py:224`), so the split and the cohesion
+  use the float32 SeisSol will actually read. 25.8% of `plastCo` nodes sat one float32 ULP
+  away. `bulkFriction` mismatches against the shipped file fell from 2,878 to **339**
+  (0.001%) once this and the Rule-1 fix landed.
+- **no guard on rho <= 0 / mu <= 0.** `np.where(vs < threshold, soft, hard)` sends NaN to
+  FALSE, so a corrupt velocity model came out silently labelled HARD rock -- the opposite
+  of the legacy's `vs >= threshold` -- with a negative cohesion only the optional M7 gate
+  would notice. It now raises, as the legacy does.
+- **missing z-axis trim.** `arange(z_min, z_max + 0.5*dz, dz)` can emit a node above
+  `z_max`; the legacy trims it (`:495-497`). Zero effect on SAFS (193.0 exactly), latent
+  for any other (z_min, z_max, dz).
 
 ### `rs_srW`: the shipped file used a documented OVERRIDE
 

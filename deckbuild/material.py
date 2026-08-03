@@ -79,11 +79,23 @@ class MaterialArtifacts:
 
 # --------------------------------------------------------------------------- derivations
 def derive_plasticity(rho, mu, spec: PlasticitySpec):
-    """(plastCo, bulkFriction) pointwise on the material grid."""
+    """(plastCo, bulkFriction, vs) pointwise on the material grid.
+
+    Raises on a non-finite or non-positive rho/mu, as the legacy does
+    (build_plasticity_roten2014.py:86-89).  Without the guard a bad velocity model does
+    not fail: `np.where(vs < threshold, soft, hard)` sends NaN to FALSE, so every bad node
+    comes out labelled HARD rock -- the OPPOSITE of the legacy's `vs >= threshold` -- with
+    a negative cohesion that only the optional M7 gate would ever notice.
+    """
     rho = np.asarray(rho, float)
     mu = np.asarray(mu, float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        vs = np.sqrt(np.where(rho > 0, mu / rho, np.nan))
+    bad = ~(np.isfinite(rho) & np.isfinite(mu)) | (rho <= 0) | (mu <= 0)
+    if bad.any():
+        raise MaterialError(
+            f"derive_plasticity: {int(bad.sum())} node(s) have non-finite or "
+            f"non-positive rho/mu (rho min {np.nanmin(rho):.6g}, mu min "
+            f"{np.nanmin(mu):.6g}); the velocity model is unusable, not merely soft")
+    vs = np.sqrt(mu / rho)
     tan_soft = float(np.tan(np.radians(spec.phi_soft_deg)))
     tan_hard = float(np.tan(np.radians(spec.phi_hard_deg)))
     bulk = np.where(vs < spec.vs_threshold, tan_soft, tan_hard)
@@ -181,6 +193,27 @@ def _cvm_slices(cfg: Project, p, path_glob=None):
         raise MaterialError(
             f"no CVM slices matched {path_glob!r} under {cfg.data_dir}")
     cols = list(p.get("columns", ["lon", "lat", "vp", "vs", "density"]))[2:]
+
+    def _to_moduli(stack, names):
+        """RULE 1: form the moduli AT THE SOURCE NODES, before the vertical resample.
+
+        legacy: generate_velocity_nc_from_raw.py:507-511 -- velocities_to_moduli on the
+        source-level slice stack, and only then resample_z.  Doing it the other way round
+        is a different function wherever an output level falls between two slices.
+        """
+        i = {n: k for k, n in enumerate(names)}
+        vp_, vs_, rho_ = (stack[:, i[c]] for c in cols)
+        mu_ = rho_ * vs_ ** 2
+        lam_ = rho_ * (vp_ ** 2 - 2.0 * vs_ ** 2)
+        if not np.all(lam_ > 0):
+            bad = int((lam_ <= 0).sum())
+            j = int(np.argmin(lam_))
+            raise MaterialError(
+                f"lambda <= 0 at {bad} SOURCE node(s) (min {lam_.min():.6g} Pa at flat "
+                f"index {j}); this needs Vp > sqrt(2)*Vs everywhere.  Checked on the "
+                f"source nodes, as the legacy does.")
+        return np.stack([rho_, mu_, lam_], axis=1), ["rho", "mu", "lambda"]
+
     gx, gy, gz, f3, info = interp_slices(
         paths, cfg.crs, cols,
         grid_dx=float(p.get("grid_dx", 1500.0)),
@@ -188,17 +221,9 @@ def _cvm_slices(cfg: Project, p, path_glob=None):
         dz=float(p.get("dz", 250.0)),
         extend_z_top=float(p.get("extend_z_top", 100.0)),
         warn_on_gap=False,          # the stage reports info["gaps"] itself
-        expect_spacing_m=p.get("expect_spacing_m"))
-    vp, vs, rho = (f3[c] for c in cols)
-    mu = rho * vs ** 2
-    lam = rho * (vp ** 2 - 2.0 * vs ** 2)
-    if not np.all(lam > 0):
-        bad = int((lam <= 0).sum())
-        i = int(np.argmin(lam))
-        raise MaterialError(
-            f"M1: lambda = rho(Vp^2 - 2Vs^2) <= 0 at {bad} node(s); worst at flat index "
-            f"{i} (Vp={vp.ravel()[i]:.1f}, Vs={vs.ravel()[i]:.1f}, "
-            f"rho={rho.ravel()[i]:.1f}).  This is a bad velocity model, not a code bug.")
+        expect_spacing_m=p.get("expect_spacing_m"),
+        transform=_to_moduli)
+    rho, mu, lam = f3["rho"], f3["mu"], f3["lambda"]
     return gx, gy, gz, {"rho": rho, "mu": mu, "lambda": lam}, info
 
 
@@ -262,7 +287,15 @@ class MaterialStage(Stage):
                                    provenance={"descriptor_sha256": cfg.sha256()})
 
         if plasticity is not None:
-            pc, bf, _vs = derive_plasticity(flds["rho"], flds["mu"], plasticity)
+            # Derive from the values that were actually WRITTEN, not the pre-write
+            # float64 arrays.  The legacy reads the material FILE back
+            # (build_plasticity_roten2014.py:224, :79-80), so both the soft/hard split
+            # and the cohesion are computed from the float32 SeisSol will read.  Using
+            # the f64 originals double-rounds plastCo -- 25.8% of nodes land one float32
+            # ULP away -- and can flip a node across the Vs threshold.  The re-read is
+            # also self-checking: it proves the plasticity grid IS the written grid.
+            _, _, _, _mf, _ = read_asagi(mpath, fields=["rho", "mu"])
+            pc, bf, _vs = derive_plasticity(_mf["rho"], _mf["mu"], plasticity)
             ppath = out_dir / (f"{prefix}plasticity_phi"
                                f"{plasticity.phi_soft_deg:g}_{plasticity.phi_hard_deg:g}.nc")
             write_asagi(ppath, gx, gy, gz, {"plastCo": pc, "bulkFriction": bf},
