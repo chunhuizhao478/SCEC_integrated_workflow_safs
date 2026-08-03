@@ -196,3 +196,58 @@ def test_the_two_notebooks_share_every_structural_cell():
             f"cell {i} has drifted between the notebooks; regenerate with "
             f"tools/make_safs_check.py\n--- deck_workflow ---\n{sa[:400]}\n"
             f"--- safs_check ---\n{sb[:400]}")
+
+
+def test_every_source_pointer_in_the_notebooks_resolves():
+    """`deckbuild/stress.py:56` style pointers must land on the symbol they name.
+
+    The STEP 4 comment maps the six stress steps to exact functions and line numbers so a
+    user knows where to start editing. Line numbers rot the moment anything above them
+    moves, and a pointer that silently drifts to the wrong function is worse than no
+    pointer -- it sends someone to edit the wrong code with confidence. So they are
+    checked, not trusted.
+
+    A pointer is accepted if the named symbol's `def`/`class` is within a few lines of the
+    quoted number, which tolerates cosmetic edits while catching real drift.
+    """
+    import json
+    import re
+
+    TOL = 3
+    pat = re.compile(r"(deckbuild/\w+\.py):(\d+)")
+    checked = 0
+    problems = []
+    for nbname in ("deck_workflow.ipynb", "safs_check.ipynb"):
+        nb = json.loads((ROOT / nbname).read_text())
+        for ci, cell in enumerate(nb["cells"]):
+            src = "".join(cell["source"])
+            for line in src.split("\n"):
+                m = pat.search(line)
+                if not m:
+                    continue
+                path, num = ROOT / m.group(1), int(m.group(2))
+                if not path.is_file():
+                    problems.append(f"{nbname} cell {ci}: {m.group(1)} does not exist")
+                    continue
+                # the symbol named on this comment line, e.g. "magnitudes_C1()"
+                names = re.findall(r"\b(_?[A-Za-z]\w*)\s*\(\)", line.split(m.group(1))[0])
+                names += re.findall(r"^\s*#\s+(_?[A-Z]\w+)\s{2,}", line)
+                if not names:
+                    continue
+                body = path.read_text().split("\n")
+                ok = False
+                for nm in names:
+                    for probe in range(max(1, num - TOL), min(len(body), num + TOL) + 1):
+                        if re.match(rf"\s*(def|class)\s+{re.escape(nm)}\b", body[probe - 1]):
+                            ok = True
+                            break
+                    if ok:
+                        break
+                checked += 1
+                if not ok:
+                    at = body[num - 1].strip()[:70] if num <= len(body) else "<past EOF>"
+                    problems.append(
+                        f"{nbname} cell {ci}: {m.group(1)}:{num} does not define "
+                        f"{names[0]!r}; that line reads: {at!r}")
+    assert checked >= 12, f"only {checked} pointers found -- the regex has stopped matching"
+    assert not problems, "stale source pointers:\n  " + "\n  ".join(problems)
