@@ -163,10 +163,18 @@ def _read_csm(spec: SourceSpec, crs: CRS, data_dir) -> OrientationField:
     path = Path(spec.path)
     if not path.is_absolute() and data_dir is not None:
         path = Path(data_dir) / path
-    col_shmax = int(p.get("shmax_col", 10))
-    col_R = int(p.get("shape_ratio_col", 13))
+    # COLUMN INDICES ARE 0-BASED.  The CSM csv's own header numbers its columns 1-BASED
+    # ("10) SHmax angle...", "13) R stress ratio...", "4) See..."), and using those
+    # numbers as indices lands one column late on every one:
+    #     10 -> SHmax_unc (an UNCERTAINTY in degrees, 0-21.75)
+    #     13 -> Aphi      (Anderson's shape parameter, 0.055-2.732, clipped into [0,1])
+    #      4 -> Sen       (the tensor read shifted by one component)
+    # The defaults below are the 0-based indices of SHmax, R and See.  Gate O1 in
+    # read_orientation() re-checks them against the data so this cannot recur silently.
+    col_shmax = int(p.get("shmax_col", 9))
+    col_R = int(p.get("shape_ratio_col", 12))
     raw = read_csm_csv(path, int(p.get("lon_col", 0)), int(p.get("lat_col", 1)),
-                       slice(int(p.get("tensor_col0", 4)), int(p.get("tensor_col0", 4)) + 6),
+                       slice(int(p.get("tensor_col0", 3)), int(p.get("tensor_col0", 3)) + 6),
                        col_shmax=col_shmax, col_R=col_R)
     from pyproj import Transformer
     tf = Transformer.from_crs(crs.geographic_epsg, crs.epsg, always_xy=True)
@@ -179,9 +187,56 @@ def _read_csm(spec: SourceSpec, crs: CRS, data_dir) -> OrientationField:
         raise OrientationError(
             f"{path}: no row has a finite SHmax (col {col_shmax}) and R (col {col_R})")
     n_dropped = raw["n_dropped"] + int((~finite).sum())
+    # GATE O1 -- are shmax_col and shape_ratio_col pointing at the right columns?
+    # They sit next to look-alikes (SHmax_unc, phi, Aphi), and the csv header numbers its
+    # columns 1-BASED, so an off-by-one is the expected mistake rather than an exotic one.
+    # The tensor components are RIGHT THERE in the same rows, so the columns can be
+    # checked against the physics instead of trusted:
+    #   * R must be a ratio in [0, 1] before any clipping -- Aphi runs to 2.7 and
+    #     SHmax_unc is in degrees, so either one fails this outright;
+    #   * R must agree with the eigendecomposition of the tensor, which is what makes
+    #     this a check on the COLUMN CHOICE and not merely on the range.
+    _audit_csm_columns(np.asarray(raw["S"], float), az, R, col_shmax, col_R, path)
     return OrientationField(cx=np.asarray(cx)[finite], cy=np.asarray(cy)[finite],
                             az_deg=az[finite] % 180.0, R=np.clip(R[finite], 0.0, 1.0),
                             kind="csm_csv", n_dropped=n_dropped)
+
+
+def _audit_csm_columns(S, az, R, col_shmax, col_R, path, tol=0.05):
+    """Raise if the named columns cannot be SHmax and R.  Called by _read_csm.
+
+    This exists because the shipped SAFS descriptors read columns 10 and 13 -- the
+    1-based header numbers for SHmax and R -- which as 0-based indices are SHmax_unc and
+    Aphi.  Every gate passed: V2 checks the eigenvalue RATIO k, which is blind to both
+    the azimuth and R, so a completely wrong orientation field sailed through.
+    """
+    good = np.isfinite(R)
+    if good.any():
+        lo, hi = float(np.min(R[good])), float(np.max(R[good]))
+        if lo < -tol or hi > 1.0 + tol:
+            raise OrientationError(
+                f"{path}: shape_ratio_col={col_R} has range [{lo:.3f}, {hi:.3f}], which "
+                f"is not a ratio in [0, 1].  The csv header numbers columns 1-BASED; if "
+                f"you took the index from it, subtract 1 (R is usually 0-based 12, and "
+                f"13 is Aphi).")
+    if S.shape[1] == 6 and good.any():
+        R_eig = csm_axes_and_shape(csm_tensors_tension(S))[1]
+        m = good & np.isfinite(R_eig)
+        if m.sum() > 100:
+            d = float(np.median(np.abs(R[m] - R_eig[m])))
+            if d > 0.05:
+                raise OrientationError(
+                    f"{path}: shape_ratio_col={col_R} disagrees with the shape ratio "
+                    f"derived from the tensor columns by a median of {d:.3f}.  Either "
+                    f"shape_ratio_col or tensor_col0 is off -- the header's column "
+                    f"numbers are 1-BASED, these indices are 0-BASED.")
+    afin = np.isfinite(az)
+    if afin.any() and float(np.max(np.abs(az[afin]))) <= 25.0:
+        raise OrientationError(
+            f"{path}: shmax_col={col_shmax} spans only "
+            f"[{float(np.min(az[afin])):.2f}, {float(np.max(az[afin])):.2f}] deg, which "
+            f"looks like an UNCERTAINTY column rather than an azimuth.  SHmax is usually "
+            f"0-based column 9; 10 is SHmax_unc.")
 
 
 def _read_constant(spec: SourceSpec, crs: CRS, data_dir) -> OrientationField:

@@ -70,8 +70,10 @@ raw:
     kind: csm_csv                 # CSM YHSM-2013 (Yang & Hauksson)
     path: raw/CSM_orientation.csv
     params:
-      shmax_col: 10               # author SHmax azimuth -- NOT an eigendecomposition
-      shape_ratio_col: 13         # R
+      shmax_col: 9                # 0-BASED index of SHmax.  The csv header numbers
+                                  # its columns 1-based; 10 is SHmax_unc, not SHmax.
+      shape_ratio_col: 12         # 0-BASED index of R = (S2-S3)/(S1-S3).
+                                  # 13 is Aphi, a different shape parameter.
   velocity:
     kind: cvm_slices              # statewide "muscal" CVM horizontal slices
     path: raw/cvm/CVM_*_h_data.csv
